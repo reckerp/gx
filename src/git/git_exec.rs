@@ -1,30 +1,8 @@
+use super::GitError;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use miette::{Diagnostic, Result};
-use thiserror::Error;
-
-#[derive(Error, Debug, Diagnostic)]
-pub enum GitError {
-    #[error("Git executable not found.")]
-    #[diagnostic(
-        code(gx::git::not_found),
-        help("Ensure that 'git' is installed and available in your PATH.")
-    )]
-    NotFound(#[source] std::io::Error),
-
-    #[error("Failed to execute git command.")]
-    #[diagnostic(code(gx::git::execution_failed))]
-    IoError(#[from] std::io::Error),
-
-    #[error("Not in git repository")]
-    #[diagnostic(code(gx::git::not_in_repo))]
-    NotInRepo,
-
-    #[error("Git command failed: {0}")]
-    #[diagnostic(code(gx::git::command_failed))]
-    CommandFailed(String),
-}
+use miette::Result;
 
 pub struct ExecOptions {
     pub silent: bool,
@@ -36,7 +14,7 @@ impl Default for ExecOptions {
     }
 }
 
-pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String> {
+pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError> {
     let mut cmd = Command::new("git");
     cmd.args(&args);
 
