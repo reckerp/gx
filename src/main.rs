@@ -1,6 +1,7 @@
 mod args;
 mod commands;
 mod git;
+mod ui;
 
 use clap::Parser;
 use miette::Result;

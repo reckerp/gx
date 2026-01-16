@@ -1,9 +1,11 @@
 use crate::git::git_exec::{self, ExecOptions};
+use std::collections::HashSet;
 
 use super::{GitError, get_repo};
 
 pub fn get_branches() -> Result<Vec<String>, GitError> {
     let repo = get_repo()?;
+    let mut seen = HashSet::new();
 
     let names = repo
         .branches(None)?
@@ -11,13 +13,18 @@ pub fn get_branches() -> Result<Vec<String>, GitError> {
         .filter_map(|(branch, branch_type)| {
             let shorthand = branch.get().shorthand()?;
 
-            match branch_type {
-                git2::BranchType::Local => Some(shorthand.to_string()),
-                git2::BranchType::Remote => {
-                    // get rid of remote name
-                    let parts: Vec<&str> = shorthand.splitn(2, '/').collect();
-                    parts.get(1).map(|&s| s.to_string())
-                }
+            let name = match branch_type {
+                git2::BranchType::Local => shorthand.to_string(),
+                git2::BranchType::Remote => shorthand
+                    .split_once('/')
+                    .map(|(_, tail)| tail.to_string())
+                    .unwrap_or_else(|| shorthand.to_string()),
+            };
+
+            if seen.insert(name.clone()) {
+                Some(name)
+            } else {
+                None
             }
         })
         .collect();

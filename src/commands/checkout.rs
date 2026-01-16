@@ -1,4 +1,5 @@
 use crate::git::{GitError, branch, commit, fetch};
+use crate::ui;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use miette::{Diagnostic, Result};
 use thiserror::Error;
@@ -16,8 +17,8 @@ pub enum CheckoutError {
         )
     )]
     NoMatch { query: String },
-    // #[error("TUI Error: {0}")]
-    // TuiError(String),
+    #[error("TUI Error: {0}")]
+    TuiError(String),
 }
 
 enum CheckoutTarget {
@@ -55,7 +56,22 @@ pub fn run(query: Option<String>) -> Result<()> {
             result.ok_or_else(|| CheckoutError::NoMatch { query: q })?
         }
         None => {
-            todo!("TUI MODE")
+            let mut terminal = ui::terminal::setup_terminal()
+                .map_err(|e| CheckoutError::TuiError(e.to_string()))?;
+
+            let selection = ui::branch_picker::run(&mut terminal, &branches);
+
+            // restore prev terminal state
+            ui::terminal::restore_terminal(terminal)
+                .map_err(|e| CheckoutError::TuiError(e.to_string()))?;
+
+            match selection? {
+                Some(branch) => CheckoutTarget::Branch(branch),
+                None => {
+                    println!("Checkout cancelled.");
+                    return Ok(());
+                }
+            }
         }
     };
 
