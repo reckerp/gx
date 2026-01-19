@@ -1,5 +1,6 @@
 use super::{Term, render_help_bar};
 use crate::git::branch::BranchInfo;
+use crate::git::time;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -55,34 +56,6 @@ fn render_branch_list(branches: &[String], selected: usize) -> List<'_> {
         .highlight_symbol(">> ")
 }
 
-fn format_relative_time(timestamp: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let diff = now - timestamp;
-
-    if diff < 60 {
-        "just now".to_string()
-    } else if diff < 3600 {
-        let mins = diff / 60;
-        format!("{} min{} ago", mins, if mins == 1 { "" } else { "s" })
-    } else if diff < 86400 {
-        let hours = diff / 3600;
-        format!("{} hour{} ago", hours, if hours == 1 { "" } else { "s" })
-    } else if diff < 604800 {
-        let days = diff / 86400;
-        format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
-    } else if diff < 2592000 {
-        let weeks = diff / 604800;
-        format!("{} week{} ago", weeks, if weeks == 1 { "" } else { "s" })
-    } else {
-        let months = diff / 2592000;
-        format!("{} month{} ago", months, if months == 1 { "" } else { "s" })
-    }
-}
-
 fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'a> {
     let content = if loading {
         "Loading...".to_string()
@@ -115,7 +88,10 @@ fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'
         lines.push("Latest commit:".to_string());
         lines.push(format!("  {} {}", info.short_id, info.summary));
         lines.push(format!("  {} <{}>", info.author_name, info.author_email));
-        lines.push(format!("  {}", format_relative_time(info.commit_time)));
+        lines.push(format!(
+            "  {}",
+            time::format_relative(time::now_secs() - info.commit_time)
+        ));
 
         // Recent commits
         if info.recent_commits.len() > 1 {
