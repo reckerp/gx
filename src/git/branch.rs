@@ -7,8 +7,13 @@ pub fn get_branches() -> Result<Vec<String>, GitError> {
     let repo = get_repo()?;
     let mut seen = HashSet::new();
 
-    let names = repo
-        .branches(None)?
+    let branches_iter = match repo.branches(None) {
+        Ok(iter) => iter,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    };
+
+    let names = branches_iter
         .filter_map(|res| res.ok())
         .filter_map(|(branch, branch_type)| {
             let shorthand = branch.get().shorthand()?;
@@ -173,7 +178,16 @@ pub struct BranchStatus {
 }
 pub fn get_current_branch() -> Result<BranchStatus, GitError> {
     let repo = get_repo()?;
-    let head = repo.head()?;
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+            return Ok(BranchStatus {
+                name: "(no commits)".to_string(),
+                is_detached: false,
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     if head.is_branch() {
         Ok(BranchStatus {
@@ -192,7 +206,13 @@ pub fn get_current_branch() -> Result<BranchStatus, GitError> {
 
 pub fn get_remote_name() -> Result<Option<String>, GitError> {
     let repo = get_repo()?;
-    let head = repo.head()?;
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     if !head.is_branch() {
         return Err(GitError::NotOnBranch);
