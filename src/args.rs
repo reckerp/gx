@@ -37,6 +37,18 @@ pub enum Commands {
         message: Option<String>,
     },
 
+    /// Push commits to remote
+    #[command(alias = "p")]
+    Push {
+        /// Force push with lease (safer)
+        #[arg(short, long)]
+        force: bool,
+
+        /// Force push without lease (dangerous)
+        #[arg(long)]
+        force_dangerously: bool,
+    },
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -50,6 +62,10 @@ impl Commands {
             Commands::Status => commands::status::run(),
             Commands::Add { interactive, paths } => commands::add::run(interactive, paths),
             Commands::Commit { message } => commands::commit::run(message),
+            Commands::Push {
+                force,
+                force_dangerously,
+            } => commands::push::run(force, force_dangerously),
         }
     }
 }
