@@ -4,6 +4,7 @@ pub mod fetch;
 pub mod git_exec;
 pub mod push;
 pub mod staging;
+pub mod stash;
 pub mod status;
 pub mod time;
 

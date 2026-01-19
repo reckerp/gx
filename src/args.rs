@@ -57,9 +57,69 @@ pub enum Commands {
         force_dangerously: bool,
     },
 
+    /// Stash changes
+    #[command(alias = "st")]
+    Stash {
+        #[command(subcommand)]
+        action: Option<StashCommands>,
+    },
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+pub enum StashCommands {
+    /// Save changes to stash (default action)
+    Push {
+        /// Stash message
+        #[arg(short, long)]
+        message: Option<String>,
+
+        /// Include untracked files
+        #[arg(short, long)]
+        untracked: bool,
+    },
+
+    /// List all stashes
+    List,
+
+    /// Apply and remove a stash
+    Pop {
+        /// Stash reference (e.g., 0 or stash@{0})
+        stash: Option<String>,
+    },
+
+    /// Apply a stash without removing it
+    Apply {
+        /// Stash reference (e.g., 0 or stash@{0})
+        stash: Option<String>,
+    },
+
+    /// Delete a stash
+    Drop {
+        /// Stash reference (e.g., 0 or stash@{0})
+        stash: Option<String>,
+    },
+
+    /// Remove all stashes
+    Clear,
+
+    /// Show the diff of a stash
+    Show {
+        /// Stash reference (e.g., 0 or stash@{0})
+        stash: Option<String>,
+    },
+
+    /// Create a branch from a stash
+    Branch {
+        /// Name for the new branch
+        name: String,
+
+        /// Stash reference (e.g., 0 or stash@{0})
+        stash: Option<String>,
+    },
 }
 
 impl Commands {
@@ -78,6 +138,21 @@ impl Commands {
                 force,
                 force_dangerously,
             } => commands::push::run(force, force_dangerously),
+            Commands::Stash { action } => match action {
+                None => commands::stash::run_interactive(),
+                Some(StashCommands::Push { message, untracked }) => {
+                    commands::stash::run_push(message, untracked)
+                }
+                Some(StashCommands::List) => commands::stash::run_list(),
+                Some(StashCommands::Pop { stash }) => commands::stash::run_pop(stash),
+                Some(StashCommands::Apply { stash }) => commands::stash::run_apply(stash),
+                Some(StashCommands::Drop { stash }) => commands::stash::run_drop(stash),
+                Some(StashCommands::Clear) => commands::stash::run_clear(),
+                Some(StashCommands::Show { stash }) => commands::stash::run_show(stash),
+                Some(StashCommands::Branch { name, stash }) => {
+                    commands::stash::run_branch(name, stash)
+                }
+            },
         }
     }
 }
