@@ -1,6 +1,18 @@
 use crate::git::GitError;
+use crate::git::git_exec::{ExecOptions, exec};
 
 use super::get_repo;
+
+pub fn create_commit(message: Option<&str>) -> Result<String, GitError> {
+    let mut args = vec!["commit".to_string()];
+
+    if let Some(msg) = message {
+        args.push("-m".to_string());
+        args.push(msg.to_string());
+    }
+
+    exec(args, ExecOptions::default())
+}
 
 pub fn is_valid_commit_ref(commit_ish: &str) -> bool {
     if let Ok(repo) = get_repo() {

@@ -136,6 +136,17 @@ fn count_stashes() -> Result<usize, GitError> {
     Ok(count)
 }
 
+pub fn has_staged_files() -> Result<bool, GitError> {
+    let repo = get_repo()?;
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(false);
+
+    let statuses = repo.statuses(Some(&mut opts))?;
+    let has_staged = statuses.iter().any(|e| e.status().intersects(STAGED_FLAGS));
+
+    Ok(has_staged)
+}
+
 fn get_last_commit_info() -> Result<(Option<String>, Option<String>), GitError> {
     let repo = get_repo()?;
     let head = match repo.head() {

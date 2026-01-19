@@ -30,6 +30,13 @@ pub enum Commands {
         paths: Vec<String>,
     },
 
+    /// Create a commit
+    #[command(alias = "c")]
+    Commit {
+        /// Commit message (opens editor if omitted)
+        message: Option<String>,
+    },
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -42,6 +49,7 @@ impl Commands {
             Self::External(args) => commands::external::run(args),
             Commands::Status => commands::status::run(),
             Commands::Add { interactive, paths } => commands::add::run(interactive, paths),
+            Commands::Commit { message } => commands::commit::run(message),
         }
     }
 }
