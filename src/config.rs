@@ -49,13 +49,13 @@ impl Default for Config {
 }
 
 pub fn load() -> miette::Result<Config> {
-    let config: Config =
-        confy::load("gx", None).map_err(|e| miette::miette!("Failed to load config: {}", e))?;
+    let config: Config = confy::load("gx", Some("config"))
+        .map_err(|e| miette::miette!("Failed to load config: {}", e))?;
     Ok(config)
 }
 
 pub fn load_path() -> miette::Result<std::path::PathBuf> {
-    let path = confy::get_configuration_file_path("gx", None)
+    let path = confy::get_configuration_file_path("gx", Some("config"))
         .map_err(|e| miette::miette!("Failed to get config path: {}", e))?;
     Ok(path)
 }
