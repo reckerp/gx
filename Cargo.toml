@@ -1,7 +1,10 @@
 [package]
 name = "gx"
+description = "GX is a smart git CLI"
+homepage = "https://github.com/reckerp/gx"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/reckerp/gx"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
@@ -11,3 +14,8 @@ git2 = "0.20.3"
 fuzzy-matcher = "0.3.7"
 ratatui = "0.30"
 crossterm = "0.29"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
