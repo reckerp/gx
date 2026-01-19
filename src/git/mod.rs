@@ -2,6 +2,8 @@ pub mod branch;
 pub mod commit;
 pub mod fetch;
 pub mod git_exec;
+pub mod status;
+pub mod time;
 
 use git2::Repository;
 use miette::Diagnostic;
@@ -23,6 +25,10 @@ pub enum GitError {
     #[error("Not in git repository")]
     #[diagnostic(code(gx::git::not_in_repo))]
     NotInRepo,
+
+    #[error("Not on branch")]
+    #[diagnostic(code(gx::git::not_on_branch))]
+    NotOnBranch,
 
     #[error("Git command failed: {0}")]
     #[diagnostic(code(gx::git::command_failed))]

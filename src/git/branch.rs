@@ -165,3 +165,69 @@ pub fn is_current_branch(branch_name: &str) -> Result<bool, GitError> {
 
     Ok(false)
 }
+
+#[derive(Debug, Clone)]
+pub struct BranchStatus {
+    pub name: String,
+    pub is_detached: bool,
+}
+pub fn get_current_branch() -> Result<BranchStatus, GitError> {
+    let repo = get_repo()?;
+    let head = repo.head()?;
+
+    if head.is_branch() {
+        Ok(BranchStatus {
+            name: head.shorthand().unwrap_or("unknown").to_string(),
+            is_detached: false,
+        })
+    } else {
+        let commit = head.peel_to_commit()?;
+        let short_id = commit.as_object().short_id()?;
+        Ok(BranchStatus {
+            name: short_id.as_str().unwrap_or("HEAD").to_string(),
+            is_detached: true,
+        })
+    }
+}
+
+pub fn get_remote_name() -> Result<Option<String>, GitError> {
+    let repo = get_repo()?;
+    let head = repo.head()?;
+
+    if !head.is_branch() {
+        return Err(GitError::NotOnBranch);
+    }
+
+    let branch_name = head.shorthand().ok_or(GitError::NotOnBranch)?;
+    let local_branch = repo.find_branch(branch_name, git2::BranchType::Local)?;
+
+    let remote_name = local_branch.upstream().ok().and_then(|upstream| {
+        upstream
+            .name()
+            .ok()
+            .flatten()
+            .map(|name| name.split('/').next().unwrap_or("origin").to_string())
+    });
+
+    Ok(remote_name)
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteTrackingInfo {
+    pub remote: String,
+    pub ahead: usize,
+    pub behind: usize,
+}
+pub fn get_remote_tracking_info(branch_name: &str) -> Result<Option<RemoteTrackingInfo>, GitError> {
+    let Some(remote_name) = get_remote_name()? else {
+        return Ok(None);
+    };
+
+    let (ahead, behind) = get_ahead_behind(branch_name)?.unwrap_or((0, 0));
+
+    Ok(Some(RemoteTrackingInfo {
+        remote: remote_name,
+        ahead,
+        behind,
+    }))
+}

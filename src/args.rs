@@ -15,6 +15,10 @@ pub enum Commands {
     #[command(alias = "co", aliases = ["switch"])]
     Checkout { query: Option<String> },
 
+    /// Show repository status
+    #[command(alias = "s")]
+    Status,
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -25,6 +29,7 @@ impl Commands {
         match self {
             Self::Checkout { query } => commands::checkout::run(query),
             Self::External(args) => commands::external::run(args),
+            Commands::Status => commands::status::run(),
         }
     }
 }
