@@ -127,78 +127,78 @@ pub fn run(
             })
             .into_diagnostic()?;
 
-        if event::poll(Duration::from_millis(50)).into_diagnostic()? {
-            if let Event::Key(key) = event::read().into_diagnostic()? {
-                match mode {
-                    Mode::List => match (key.code, key.modifiers) {
-                        (KeyCode::Esc, _)
-                        | (KeyCode::Char('q'), _)
-                        | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                            return Ok(None);
+        if event::poll(Duration::from_millis(50)).into_diagnostic()?
+            && let Event::Key(key) = event::read().into_diagnostic()?
+        {
+            match mode {
+                Mode::List => match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _)
+                    | (KeyCode::Char('q'), _)
+                    | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        return Ok(None);
+                    }
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                        selected_index = selected_index.saturating_sub(1);
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                        if selected_index + 1 < stashes.len() {
+                            selected_index += 1;
                         }
-                        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                            selected_index = selected_index.saturating_sub(1);
-                        }
-                        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                            if selected_index + 1 < stashes.len() {
-                                selected_index += 1;
-                            }
-                        }
-                        (KeyCode::Enter, _) => {
-                            mode = Mode::Action;
-                            action_menu = ActionMenu::new();
-                        }
-                        (KeyCode::Char('p'), _) => {
-                            return Ok(Some(StashPickerResult {
-                                entry: stashes[selected_index].clone(),
-                                action: StashAction::Pop,
-                            }));
-                        }
-                        (KeyCode::Char('a'), _) => {
-                            return Ok(Some(StashPickerResult {
-                                entry: stashes[selected_index].clone(),
-                                action: StashAction::Apply,
-                            }));
-                        }
-                        (KeyCode::Char('d'), _) => {
-                            return Ok(Some(StashPickerResult {
-                                entry: stashes[selected_index].clone(),
-                                action: StashAction::Drop,
-                            }));
-                        }
-                        (KeyCode::Char('s'), _) => {
-                            return Ok(Some(StashPickerResult {
-                                entry: stashes[selected_index].clone(),
-                                action: StashAction::Show,
-                            }));
-                        }
-                        (KeyCode::Char('b'), _) => {
-                            return Ok(Some(StashPickerResult {
-                                entry: stashes[selected_index].clone(),
-                                action: StashAction::Branch,
-                            }));
-                        }
-                        _ => {}
-                    },
-                    Mode::Action => match (key.code, key.modifiers) {
-                        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                            mode = Mode::List;
-                        }
-                        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                            action_menu.up();
-                        }
-                        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                            action_menu.down();
-                        }
-                        (KeyCode::Enter, _) => {
-                            return Ok(Some(StashPickerResult {
-                                entry: stashes[selected_index].clone(),
-                                action: action_menu.selected_action(),
-                            }));
-                        }
-                        _ => {}
-                    },
-                }
+                    }
+                    (KeyCode::Enter, _) => {
+                        mode = Mode::Action;
+                        action_menu = ActionMenu::new();
+                    }
+                    (KeyCode::Char('p'), _) => {
+                        return Ok(Some(StashPickerResult {
+                            entry: stashes[selected_index].clone(),
+                            action: StashAction::Pop,
+                        }));
+                    }
+                    (KeyCode::Char('a'), _) => {
+                        return Ok(Some(StashPickerResult {
+                            entry: stashes[selected_index].clone(),
+                            action: StashAction::Apply,
+                        }));
+                    }
+                    (KeyCode::Char('d'), _) => {
+                        return Ok(Some(StashPickerResult {
+                            entry: stashes[selected_index].clone(),
+                            action: StashAction::Drop,
+                        }));
+                    }
+                    (KeyCode::Char('s'), _) => {
+                        return Ok(Some(StashPickerResult {
+                            entry: stashes[selected_index].clone(),
+                            action: StashAction::Show,
+                        }));
+                    }
+                    (KeyCode::Char('b'), _) => {
+                        return Ok(Some(StashPickerResult {
+                            entry: stashes[selected_index].clone(),
+                            action: StashAction::Branch,
+                        }));
+                    }
+                    _ => {}
+                },
+                Mode::Action => match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        mode = Mode::List;
+                    }
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                        action_menu.up();
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                        action_menu.down();
+                    }
+                    (KeyCode::Enter, _) => {
+                        return Ok(Some(StashPickerResult {
+                            entry: stashes[selected_index].clone(),
+                            action: action_menu.selected_action(),
+                        }));
+                    }
+                    _ => {}
+                },
             }
         }
     }

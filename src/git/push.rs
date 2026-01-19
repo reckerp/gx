@@ -2,18 +2,10 @@ use super::GitError;
 use super::branch::get_current_branch;
 use super::git_exec::{ExecOptions, exec};
 
+#[derive(Default)]
 pub struct PushOptions {
     pub force: bool,
     pub force_dangerously: bool,
-}
-
-impl Default for PushOptions {
-    fn default() -> Self {
-        Self {
-            force: false,
-            force_dangerously: false,
-        }
-    }
 }
 
 pub fn push(options: PushOptions) -> Result<String, GitError> {

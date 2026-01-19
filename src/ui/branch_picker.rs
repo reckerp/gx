@@ -70,18 +70,18 @@ fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'
         lines.push(String::new());
 
         // ahead/behind info
-        if let Some((ahead, behind)) = info.ahead_behind {
-            if ahead > 0 || behind > 0 {
-                let mut parts = Vec::new();
-                if ahead > 0 {
-                    parts.push(format!("+{} ahead", ahead));
-                }
-                if behind > 0 {
-                    parts.push(format!("-{} behind", behind));
-                }
-                lines.push(parts.join(", "));
-                lines.push(String::new());
+        if let Some((ahead, behind)) = info.ahead_behind
+            && (ahead > 0 || behind > 0)
+        {
+            let mut parts = Vec::new();
+            if ahead > 0 {
+                parts.push(format!("+{} ahead", ahead));
             }
+            if behind > 0 {
+                parts.push(format!("-{} behind", behind));
+            }
+            lines.push(parts.join(", "));
+            lines.push(String::new());
         }
 
         // Latest commit
@@ -97,7 +97,7 @@ fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'
         if info.recent_commits.len() > 1 {
             lines.push(String::new());
             lines.push("Recent commits:".to_string());
-            for (_, msg) in info.recent_commits.iter().skip(1).take(4).enumerate() {
+            for msg in info.recent_commits.iter().skip(1).take(4) {
                 lines.push(format!("  > {}", msg));
             }
         }
@@ -198,31 +198,31 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
             })
             .into_diagnostic()?;
 
-        if event::poll(Duration::from_millis(50)).into_diagnostic()? {
-            if let Event::Key(key) = event::read().into_diagnostic()? {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        return Ok(None);
-                    }
-                    (KeyCode::Enter, _) => return Ok(filtered.get(selected_index).cloned()),
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        selected_index = selected_index.saturating_sub(1);
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        if selected_index + 1 < filtered.len() {
-                            selected_index += 1;
-                        }
-                    }
-                    (KeyCode::Backspace, _) => {
-                        query.pop();
-                        selected_index = 0;
-                    }
-                    (KeyCode::Char(c), _) => {
-                        query.push(c);
-                        selected_index = 0;
-                    }
-                    _ => {}
+        if event::poll(Duration::from_millis(50)).into_diagnostic()?
+            && let Event::Key(key) = event::read().into_diagnostic()?
+        {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    return Ok(None);
                 }
+                (KeyCode::Enter, _) => return Ok(filtered.get(selected_index).cloned()),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    selected_index = selected_index.saturating_sub(1);
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    if selected_index + 1 < filtered.len() {
+                        selected_index += 1;
+                    }
+                }
+                (KeyCode::Backspace, _) => {
+                    query.pop();
+                    selected_index = 0;
+                }
+                (KeyCode::Char(c), _) => {
+                    query.push(c);
+                    selected_index = 0;
+                }
+                _ => {}
             }
         }
     }

@@ -4,14 +4,9 @@ use std::process::{Command, Stdio};
 
 use miette::Result;
 
+#[derive(Default)]
 pub struct ExecOptions {
     pub silent: bool,
-}
-
-impl Default for ExecOptions {
-    fn default() -> Self {
-        Self { silent: false }
-    }
 }
 
 pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError> {
@@ -38,7 +33,7 @@ pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError>
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(map_git_error(stderr).into());
+        return Err(map_git_error(stderr));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

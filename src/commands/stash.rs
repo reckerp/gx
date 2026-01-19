@@ -225,10 +225,10 @@ fn resolve_stash_index(stash_ref: Option<&str>) -> Result<usize> {
 
     if reference.starts_with("stash@{") && reference.ends_with('}') {
         let inner = &reference[7..reference.len() - 1];
-        if let Ok(index) = inner.parse::<usize>() {
-            if index < stashes.len() {
-                return Ok(index);
-            }
+        if let Ok(index) = inner.parse::<usize>()
+            && index < stashes.len()
+        {
+            return Ok(index);
         }
     }
 

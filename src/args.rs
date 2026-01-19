@@ -64,6 +64,14 @@ pub enum Commands {
         action: Option<StashCommands>,
     },
 
+    /// View commit history
+    #[command(alias = "l")]
+    Log {
+        /// Maximum number of commits to show
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+    },
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -153,6 +161,7 @@ impl Commands {
                     commands::stash::run_branch(name, stash)
                 }
             },
+            Commands::Log { limit } => commands::log::run(limit),
         }
     }
 }

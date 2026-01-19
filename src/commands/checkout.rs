@@ -53,7 +53,7 @@ pub fn run(query: Option<String>) -> Result<()> {
                 }
             }
 
-            result.ok_or_else(|| CheckoutError::NoMatch { query: q })?
+            result.ok_or(CheckoutError::NoMatch { query: q })?
         }
         None => {
             let mut terminal = ui::terminal::setup_terminal()

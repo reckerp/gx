@@ -157,10 +157,10 @@ pub fn get_recent_commits(branch_name: &str, limit: usize) -> Result<Vec<String>
 pub fn is_current_branch(branch_name: &str) -> Result<bool, GitError> {
     let repo = get_repo()?;
 
-    if let Ok(head) = repo.head() {
-        if let Some(name) = head.shorthand() {
-            return Ok(name == branch_name);
-        }
+    if let Ok(head) = repo.head()
+        && let Some(name) = head.shorthand()
+    {
+        return Ok(name == branch_name);
     }
 
     Ok(false)
