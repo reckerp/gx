@@ -35,6 +35,14 @@ pub enum Commands {
     Commit {
         /// Commit message (opens editor if omitted)
         message: Option<String>,
+
+        /// Amend the previous commit
+        #[arg(long)]
+        amend: bool,
+
+        /// Use the existing commit message without editing
+        #[arg(long)]
+        no_edit: bool,
     },
 
     /// Push commits to remote
@@ -61,7 +69,11 @@ impl Commands {
             Self::External(args) => commands::external::run(args),
             Commands::Status => commands::status::run(),
             Commands::Add { interactive, paths } => commands::add::run(interactive, paths),
-            Commands::Commit { message } => commands::commit::run(message),
+            Commands::Commit {
+                message,
+                amend,
+                no_edit,
+            } => commands::commit::run(message, amend, no_edit),
             Commands::Push {
                 force,
                 force_dangerously,

@@ -3,10 +3,25 @@ use crate::git::git_exec::{ExecOptions, exec};
 
 use super::get_repo;
 
-pub fn create_commit(message: Option<&str>) -> Result<String, GitError> {
+pub struct CommitOptions<'a> {
+    pub message: Option<&'a str>,
+    pub amend: bool,
+    pub no_edit: bool,
+}
+
+pub fn create_commit(options: CommitOptions) -> Result<String, GitError> {
     let mut args = vec!["commit".to_string()];
 
-    if let Some(msg) = message {
+    if options.amend {
+        args.push("--amend".to_string());
+        args.push("--date=now".to_string());
+    }
+
+    if options.no_edit {
+        args.push("--no-edit".to_string());
+    }
+
+    if let Some(msg) = options.message {
         args.push("-m".to_string());
         args.push(msg.to_string());
     }
