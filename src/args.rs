@@ -19,6 +19,17 @@ pub enum Commands {
     #[command(alias = "s")]
     Status,
 
+    /// Stage files for commit
+    #[command(alias = "a")]
+    Add {
+        /// Interactive mode - select files to stage
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Files/folders to stage (stages all if omitted)
+        paths: Vec<String>,
+    },
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -30,6 +41,7 @@ impl Commands {
             Self::Checkout { query } => commands::checkout::run(query),
             Self::External(args) => commands::external::run(args),
             Commands::Status => commands::status::run(),
+            Commands::Add { interactive, paths } => commands::add::run(interactive, paths),
         }
     }
 }

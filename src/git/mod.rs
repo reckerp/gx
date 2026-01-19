@@ -2,6 +2,7 @@ pub mod branch;
 pub mod commit;
 pub mod fetch;
 pub mod git_exec;
+pub mod staging;
 pub mod status;
 pub mod time;
 

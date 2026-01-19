@@ -1,4 +1,5 @@
 pub mod branch_picker;
+pub mod file_picker;
 pub mod status;
 pub mod terminal;
 
