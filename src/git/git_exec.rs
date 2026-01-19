@@ -7,11 +7,27 @@ use miette::Result;
 #[derive(Default)]
 pub struct ExecOptions {
     pub silent: bool,
+    pub capture: bool,
+    pub inherit: bool,
 }
 
 pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError> {
     let mut cmd = Command::new("git");
     cmd.args(&args);
+
+    if options.inherit {
+        cmd.stdin(Stdio::inherit());
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+
+        let status = cmd.status()?;
+
+        if !status.success() {
+            return Err(GitError::CommandFailed("Command failed".to_string()));
+        }
+
+        return Ok(String::new());
+    }
 
     if options.silent {
         cmd.stdout(Stdio::null());
@@ -26,7 +42,7 @@ pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError>
         _ => GitError::IoError(e),
     })?;
 
-    if !options.silent {
+    if !options.silent && !options.capture {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         let _ = std::io::stdout().flush();
     }

@@ -65,3 +65,28 @@ pub fn stage_all() -> Result<Vec<String>, GitError> {
 
     Ok(staged)
 }
+
+pub fn get_staged_diff() -> Result<String, GitError> {
+    let repo = get_repo()?;
+    let mut diff_options = git2::DiffOptions::new();
+
+    let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+
+    let diff = repo.diff_tree_to_index(
+        head_tree.as_ref(),
+        Some(&repo.index()?),
+        Some(&mut diff_options),
+    )?;
+
+    let mut diff_text = String::new();
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        let content = std::str::from_utf8(line.content()).unwrap_or("");
+        match line.origin() {
+            '+' | '-' | ' ' => diff_text.push_str(&format!("{}{}", line.origin(), content)),
+            _ => diff_text.push_str(content),
+        }
+        true
+    })?;
+
+    Ok(diff_text)
+}

@@ -5,6 +5,27 @@ use std::collections::HashMap;
 pub struct Config {
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+
+    #[serde(default)]
+    pub ai: AiConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AiConfig {
+    #[serde(default = "default_model")]
+    pub model: String,
+}
+
+fn default_model() -> String {
+    "opencode/big-pickle".to_string()
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        AiConfig {
+            model: default_model(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -20,7 +41,10 @@ impl Default for Config {
         aliases.insert("gst".to_string(), "stash".to_string());
         aliases.insert("gl".to_string(), "log".to_string());
 
-        Config { aliases }
+        Config {
+            aliases,
+            ai: AiConfig::default(),
+        }
     }
 }
 

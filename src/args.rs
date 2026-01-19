@@ -43,6 +43,10 @@ pub enum Commands {
         /// Use the existing commit message without editing
         #[arg(long)]
         no_edit: bool,
+
+        /// Generate commit message using AI
+        #[arg(long)]
+        ai: bool,
     },
 
     /// Push commits to remote
@@ -144,7 +148,8 @@ impl Commands {
                 message,
                 amend,
                 no_edit,
-            } => commands::commit::run(message, amend, no_edit),
+                ai,
+            } => commands::commit::run(message, amend, no_edit, ai),
             Commands::Push {
                 force,
                 force_dangerously,

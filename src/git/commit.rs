@@ -29,6 +29,35 @@ pub fn create_commit(options: CommitOptions) -> Result<String, GitError> {
     exec(args, ExecOptions::default())
 }
 
+pub fn create_commit_with_editor(initial_message: &str, amend: bool) -> Result<String, GitError> {
+    let repo = get_repo()?;
+    let git_dir = repo.path();
+    let commit_msg_path = git_dir.join("COMMIT_EDITMSG");
+
+    std::fs::write(&commit_msg_path, initial_message)?;
+
+    let mut args = vec!["commit".to_string()];
+
+    if amend {
+        args.push("--amend".to_string());
+        args.push("--date=now".to_string());
+    }
+
+    args.push("-e".to_string());
+    args.push("-F".to_string());
+    args.push(commit_msg_path.to_string_lossy().to_string());
+
+    exec(
+        args,
+        ExecOptions {
+            inherit: true,
+            ..Default::default()
+        },
+    )?;
+
+    Ok("Commit created".to_string())
+}
+
 pub fn is_valid_commit_ref(commit_ish: &str) -> bool {
     if let Ok(repo) = get_repo() {
         repo.revparse_single(commit_ish)
