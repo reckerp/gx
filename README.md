@@ -5,12 +5,13 @@ GX is a smart Git CLI that provides a streamlined interface for common Git opera
 ## Installation
 
 **Homebrew:**
+
 ```bash
-brew tap reckerp/tap
-brew install gx
+brew install reckerp/tap/gx
 ```
 
 **Source:**
+
 ```bash
 cargo install --path .
 ```
@@ -27,19 +28,18 @@ cargo build
 cargo run -- <arguments>
 ```
 
-
 ## Commands
 
-| Command | Aliases | Description |
-|---------|---------|-------------|
+| Command    | Aliases        | Description                         |
+| ---------- | -------------- | ----------------------------------- |
 | `checkout` | `co`, `switch` | Checkout/Switch a branch/commit/tag |
-| `status` | `s` | Show repository status |
-| `add` | `a` | Stage files for commit |
-| `commit` | `c` | Create a commit |
-| `push` | `p` | Push commits to remote |
-| `stash` | `st` | Stash changes |
-| `log` | `l` | View commit history |
-| `setup` | - | Generate shell aliases from config |
+| `status`   | `s`            | Show repository status              |
+| `add`      | `a`            | Stage files for commit              |
+| `commit`   | `c`            | Create a commit                     |
+| `push`     | `p`            | Push commits to remote              |
+| `stash`    | `st`           | Stash changes                       |
+| `log`      | `l`            | View commit history                 |
+| `setup`    | -              | Generate shell aliases from config  |
 
 ### Checkout
 
@@ -52,6 +52,7 @@ gx switch <query>
 ```
 
 **Arguments:**
+
 - `query` (optional): Branch/commit/tag to checkout (supports fuzzy matching)
 
 ### Status
@@ -75,6 +76,7 @@ gx a -i
 ```
 
 **Flags:**
+
 - `-i`, `--interactive`: Select files interactively
 
 ### Commit
@@ -92,6 +94,7 @@ gx commit --no-edit       # Amend without editing message
 ```
 
 **Flags:**
+
 - `-m`, `--message`: Commit message
 - `--amend`: Amend the previous commit
 - `--no-edit`: Use existing commit message without editing
@@ -109,6 +112,7 @@ gx push --force_dangerously
 ```
 
 **Flags:**
+
 - `-f`, `--force`: Force push with lease (safer)
 - `--force_dangerously`: Force push without lease (dangerous)
 
@@ -135,6 +139,7 @@ gx stash branch <name>   # Create branch from stash
 ```
 
 **Stash Flags:**
+
 - `-m`, `--message`: Stash message (push)
 - `-u`, `--untracked`: Include untracked files (push)
 
@@ -150,6 +155,7 @@ gx log --limit 10
 ```
 
 **Flags:**
+
 - `-n`, `--limit`: Maximum number of commits to show
 
 ### Setup
