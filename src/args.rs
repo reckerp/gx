@@ -72,6 +72,9 @@ pub enum Commands {
         limit: Option<usize>,
     },
 
+    /// Generate shell aliases from config
+    Setup,
+
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -162,6 +165,7 @@ impl Commands {
                 }
             },
             Commands::Log { limit } => commands::log::run(limit),
+            Commands::Setup => commands::setup::run(),
         }
     }
 }

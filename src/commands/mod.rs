@@ -4,5 +4,6 @@ pub mod commit;
 pub mod external;
 pub mod log;
 pub mod push;
+pub mod setup;
 pub mod stash;
 pub mod status;
