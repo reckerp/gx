@@ -46,6 +46,22 @@ pub fn checkout_branch(branch_name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+pub fn create_branch(branch_name: &str, start_point: Option<&str>) -> Result<(), GitError> {
+    let repo = get_repo()?;
+
+    let commit = if let Some(sp) = start_point {
+        let obj = repo.revparse_single(sp)?;
+        obj.peel_to_commit()?
+    } else {
+        let head = repo.head()?;
+        head.peel_to_commit()?
+    };
+
+    repo.branch(branch_name, &commit, false)?;
+
+    Ok(())
+}
+
 // aggregated branch information
 pub struct BranchInfo {
     pub name: String,

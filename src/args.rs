@@ -13,7 +13,14 @@ pub struct Cli {
 pub enum Commands {
     /// Checkout/Switch a branch|commit|tag
     #[command(alias = "co", aliases = ["switch"])]
-    Checkout { query: Option<String> },
+    Checkout {
+        /// Create a new branch and switch to it
+        #[arg(short = 'b', long)]
+        create_branch: Option<String>,
+
+        /// Branch, commit, or tag to checkout
+        query: Option<String>,
+    },
 
     /// Show repository status
     #[command(alias = "s")]
@@ -140,7 +147,10 @@ pub enum StashCommands {
 impl Commands {
     pub fn run(self) -> Result<()> {
         match self {
-            Self::Checkout { query } => commands::checkout::run(query),
+            Self::Checkout {
+                create_branch,
+                query,
+            } => commands::checkout::run(create_branch, query),
             Self::External(args) => commands::external::run(args),
             Commands::Status => commands::status::run(),
             Commands::Add { interactive, paths } => commands::add::run(interactive, paths),

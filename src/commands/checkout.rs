@@ -17,6 +17,12 @@ pub enum CheckoutError {
         )
     )]
     NoMatch { query: String },
+    #[error("Branch name is required when using -b flag")]
+    #[diagnostic(
+        code(gx::git::missing_branch_name),
+        help("Usage: gx checkout -b <branch-name> [start-point]")
+    )]
+    MissingBranchName,
     #[error("TUI Error: {0}")]
     TuiError(String),
 }
@@ -26,7 +32,16 @@ enum CheckoutTarget {
     Commit(String),
 }
 
-pub fn run(query: Option<String>) -> Result<()> {
+pub fn run(create_branch: Option<String>, query: Option<String>) -> Result<()> {
+    if let Some(new_branch_name) = create_branch {
+        branch::create_branch(&new_branch_name, query.as_deref())
+            .map_err(CheckoutError::GitError)?;
+
+        branch::checkout_branch(&new_branch_name)?;
+        println!("Switched to a new branch '{}'", new_branch_name);
+        return Ok(());
+    }
+
     let branches = branch::get_branches().map_err(CheckoutError::GitError)?;
 
     let target = match query {
