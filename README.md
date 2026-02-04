@@ -177,7 +177,19 @@ gx remote -v
 
 ## Configuration
 
-GX uses a configuration file stored at `~/.config/gx/config.toml`. It allows for easy aliasing and customizations. Add `eval "$(gx setup)"` to your shell configuration to load the aliases you configured in the config file. Furthermore, you can change the [opencode](https://opencode.ai) model which is used for the AI commit message generation.
+GX uses a configuration file stored at `~/.config/gx/config.toml`. It allows for easy aliasing and customizations. Add `eval "$(gx setup)"` to your shell configuration to load the aliases you configured in the config file.
+
+### AI Configuration
+
+You can configure the AI agent and model used for AI-generated commit messages:
+
+```toml
+[ai]
+agent = "opencode"  # Options: "opencode" or "claude"
+model = "opencode/big-pickle"  # Model to use
+```
+
+For Claude, the default model you should use is "haiku". You can configure the agent and model to your preference.
 
 ## License
 

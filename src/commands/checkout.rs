@@ -1,6 +1,6 @@
-use crate::git::{GitError, branch, commit, fetch};
+use crate::git::{branch, commit, fetch, GitError};
 use crate::ui;
-use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use miette::{Diagnostic, Result};
 use thiserror::Error;
 
@@ -17,12 +17,6 @@ pub enum CheckoutError {
         )
     )]
     NoMatch { query: String },
-    #[error("Branch name is required when using -b flag")]
-    #[diagnostic(
-        code(gx::git::missing_branch_name),
-        help("Usage: gx checkout -b <branch-name> [start-point]")
-    )]
-    MissingBranchName,
     #[error("TUI Error: {0}")]
     TuiError(String),
 }

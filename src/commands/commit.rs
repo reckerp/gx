@@ -1,12 +1,31 @@
 use crate::config;
+use crate::config::Agent;
 use crate::git;
-use crate::git::GitError;
 use crate::git::commit::CommitOptions;
+use crate::git::GitError;
 use crate::ui;
 use miette::{Diagnostic, Result};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use thiserror::Error;
+
+const COMMIT_MESSAGE_PROMPT: &str = r#"Analyze this git diff and generate a conventional commit message following these rules:
+
+- feat: NEW functionality or feature added
+- fix: BUG fixes or corrections
+- refactor: code restructuring WITHOUT behavior changes
+- docs: documentation changes ONLY
+- style: formatting, whitespace, missing semicolons (no code logic change)
+- test: adding or updating tests
+- perf: performance improvements
+- chore: dependency updates, build config, tooling
+- ci: CI/CD pipeline changes
+- build: build system or external dependency changes
+
+Carefully analyze what the diff actually does. Most changes are NOT features.
+
+Output format: <type>: <imperative description>
+Output ONLY the commit message, nothing else."#;
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum CommitError {
@@ -35,7 +54,7 @@ pub enum CommitError {
     #[error("AI error: {0}")]
     #[diagnostic(
         code(gx::commit::ai_error),
-        help("Ensure 'opencode' is installed and available in your PATH")
+        help("Ensure the configured AI agent is installed and available in your PATH")
     )]
     AiError(String),
 }
@@ -88,9 +107,10 @@ fn run_ai_commit(amend: bool) -> Result<()> {
     }
 
     let config = config::load()?;
+    let agent = config.ai.get_agent().map_err(CommitError::AiError)?;
     let model = &config.ai.model;
 
-    let ai_message = generate_commit_message(&diff, model)?;
+    let ai_message = generate_commit_message(&diff, &agent, model)?;
 
     println!("AI generated commit message:\n");
     println!("  {}\n", ai_message);
@@ -112,32 +132,39 @@ fn run_ai_commit(amend: bool) -> Result<()> {
     Ok(())
 }
 
-fn generate_commit_message(diff: &str, model: &str) -> Result<String, CommitError> {
-    let prompt = r#"Analyze this git diff and generate a conventional commit message following these rules:
+fn build_agent_command(agent: &Agent, model: &str) -> (String, Vec<String>) {
+    match agent {
+        Agent::OpenCode => (
+            "opencode".to_string(),
+            vec![
+                "run".to_string(),
+                COMMIT_MESSAGE_PROMPT.to_string(),
+                "--model".to_string(),
+                model.to_string(),
+            ],
+        ),
+        Agent::Claude => (
+            "claude".to_string(),
+            vec![
+                "-p".to_string(),
+                COMMIT_MESSAGE_PROMPT.to_string(),
+                "--model".to_string(),
+                model.to_string(),
+            ],
+        ),
+    }
+}
 
-- feat: NEW functionality or feature added
-- fix: BUG fixes or corrections
-- refactor: code restructuring WITHOUT behavior changes
-- docs: documentation changes ONLY
-- style: formatting, whitespace, missing semicolons (no code logic change)
-- test: adding or updating tests
-- perf: performance improvements
-- chore: dependency updates, build config, tooling
-- ci: CI/CD pipeline changes
-- build: build system or external dependency changes
+fn generate_commit_message(diff: &str, agent: &Agent, model: &str) -> Result<String, CommitError> {
+    let (command, args) = build_agent_command(agent, model);
 
-Carefully analyze what the diff actually does. Most changes are NOT features.
-
-Output format: <type>: <imperative description>
-Output ONLY the commit message, nothing else."#;
-
-    let mut child = Command::new("opencode")
-        .args(["run", prompt, "--model", model])
+    let mut child = Command::new(&command)
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| CommitError::AiError(format!("Failed to spawn opencode: {}", e)))?;
+        .map_err(|e| CommitError::AiError(format!("Failed to spawn {}: {}", command, e)))?;
 
     {
         let stdin = child
@@ -151,12 +178,13 @@ Output ONLY the commit message, nothing else."#;
 
     let output = child
         .wait_with_output()
-        .map_err(|e| CommitError::AiError(format!("Failed to wait for opencode: {}", e)))?;
+        .map_err(|e| CommitError::AiError(format!("Failed to wait for {}: {}", command, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CommitError::AiError(format!(
-            "opencode failed: {}",
+            "{} failed: {}",
+            command,
             stderr.trim()
         )));
     }
@@ -164,9 +192,10 @@ Output ONLY the commit message, nothing else."#;
     let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     if message.is_empty() {
-        return Err(CommitError::AiError(
-            "opencode returned empty message".to_string(),
-        ));
+        return Err(CommitError::AiError(format!(
+            "{} returned empty message",
+            command
+        )));
     }
 
     Ok(message)
