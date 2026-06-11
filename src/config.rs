@@ -59,6 +59,40 @@ pub struct Config {
 
     #[serde(default)]
     pub ai: AiConfig,
+
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Where workspaces are created, relative to the main worktree root.
+    /// `{repo}` is replaced by the repository directory name.
+    #[serde(default = "default_workspace_root")]
+    pub root: String,
+
+    /// Files copied from the main worktree into new workspaces (e.g. ".env").
+    /// Paths are relative to the repo root; the filename component may
+    /// contain `*`/`?` wildcards. Missing files are skipped silently.
+    #[serde(default = "default_copy_files")]
+    pub copy_files: Vec<String>,
+}
+
+fn default_workspace_root() -> String {
+    "../{repo}-workspaces".to_string()
+}
+
+fn default_copy_files() -> Vec<String> {
+    vec![".env".to_string()]
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        WorkspaceConfig {
+            root: default_workspace_root(),
+            copy_files: default_copy_files(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,6 +143,7 @@ impl Default for Config {
         Config {
             aliases,
             ai: AiConfig::default(),
+            workspace: WorkspaceConfig::default(),
         }
     }
 }
@@ -134,6 +169,8 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.ai.agent, "opencode");
         assert_eq!(config.ai.model, "opencode/big-pickle");
+        assert_eq!(config.workspace.root, "../{repo}-workspaces");
+        assert_eq!(config.workspace.copy_files, vec![".env".to_string()]);
     }
 
     #[test]

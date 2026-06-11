@@ -4,11 +4,22 @@ use miette::IntoDiagnostic;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use ratatui::{TerminalOptions, Viewport};
-use std::io;
+use std::io::{self, Write};
 
 pub fn run(message: &str) -> miette::Result<bool> {
     let mut stdout = io::stdout();
-    let backend = CrosstermBackend::new(&mut stdout);
+    run_inner(message, &mut stdout)
+}
+
+/// Confirm prompt rendered on stderr, keeping stdout clean for
+/// machine-readable output (e.g. paths consumed by the shell wrapper).
+pub fn run_on_stderr(message: &str) -> miette::Result<bool> {
+    let mut stderr = io::stderr();
+    run_inner(message, &mut stderr)
+}
+
+fn run_inner<W: Write>(message: &str, writer: &mut W) -> miette::Result<bool> {
+    let backend = CrosstermBackend::new(writer);
     let mut terminal = Terminal::with_options(
         backend,
         TerminalOptions {
@@ -56,17 +67,17 @@ pub fn run(message: &str) -> miette::Result<bool> {
                 KeyCode::Right | KeyCode::Char('l') => selected = 1,
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     disable_raw_mode().ok();
-                    println!();
+                    eprintln!();
                     return Ok(true);
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     disable_raw_mode().ok();
-                    println!();
+                    eprintln!();
                     return Ok(false);
                 }
                 KeyCode::Enter => {
                     disable_raw_mode().ok();
-                    println!();
+                    eprintln!();
                     return Ok(selected == 0);
                 }
                 _ => {}

@@ -8,6 +8,7 @@ pub mod staging;
 pub mod stash;
 pub mod status;
 pub mod time;
+pub mod worktree;
 
 use git2::Repository;
 use miette::Diagnostic;
