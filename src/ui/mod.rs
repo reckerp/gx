@@ -5,12 +5,14 @@ pub mod log_viewer;
 pub mod stash_picker;
 pub mod status;
 pub mod terminal;
+pub mod workspace_picker;
 
 use ratatui::prelude::*;
 use ratatui::widgets::*;
-use std::io::Stdout;
+use std::io::{Stderr, Stdout};
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
+pub type TermStderr = Terminal<CrosstermBackend<Stderr>>;
 
 pub fn render_help_bar(hints: &[(&str, &str)]) -> Paragraph<'static> {
     let mut spans = Vec::new();

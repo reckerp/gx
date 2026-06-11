@@ -39,6 +39,7 @@ cargo run -- <arguments>
 | `push`     | `p`            | Push commits to remote              |
 | `stash`    | `st`           | Stash changes                       |
 | `log`      | `l`            | View commit history                 |
+| `workspace`| `ws`           | Manage workspaces (git worktrees)   |
 | `setup`    | -              | Generate shell aliases from config  |
 
 ### Checkout
@@ -158,6 +159,34 @@ gx log --limit 10
 
 - `-n`, `--limit`: Maximum number of commits to show
 
+### Workspace
+
+Manage workspaces (git worktrees): isolated checkouts of the same repository, each on its own branch. By default workspaces live in `~/gx/workspaces/<repo>/<name>`.
+
+```bash
+gx workspace               # Interactive workspace picker (TUI)
+gx ws                      # Same, shorter
+
+gx workspace new <name>            # Create workspace + branch <name>, copy setup files
+gx workspace new <name> <base>     # Create the new branch from <base>
+gx workspace new <name> -b <branch> # Check out an existing/specific branch
+# If <name> matches a remote branch (e.g. origin/<name>), the new branch
+# is created from it and set up to track it.
+gx workspace new <name> --no-setup # Skip copying setup files
+
+gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)
+gx workspace list          # List all workspaces
+gx workspace remove [query] # Remove a workspace (asks for confirmation)
+gx workspace remove <name> --force # Remove even with uncommitted changes
+gx workspace setup         # Re-copy setup files from the main worktree into this one
+```
+
+**Interactive TUI** (`gx workspace`): fuzzy search across workspace names and branches, with `enter` to switch, `ctrl+n` to create a workspace named after the current query, and `ctrl+d` to remove the selection.
+
+**Changing directories:** a child process can't change your shell's directory, so `cd`-on-switch is handled by the shell wrapper emitted by `gx setup`. With `eval "$(gx setup)"` in your shell config, `gx workspace go`, `gx workspace new`, and the TUI will land you directly in the workspace. Without it, the workspace path is printed so you can `cd "$(gx workspace go <query>)"` yourself.
+
+**Setup files:** files like `.env` are usually gitignored, so a fresh worktree doesn't have them. When creating a workspace, gx copies the files configured in `workspace.copy_files` from the main worktree into the new one (missing files are skipped). See [Workspace Configuration](#workspace-configuration).
+
 ### Setup
 
 Generate shell aliases from configuration.
@@ -165,6 +194,8 @@ Generate shell aliases from configuration.
 ```bash
 gx setup
 ```
+
+This also emits the shell wrapper used for the workspace `cd` integration.
 
 ### External
 
@@ -190,6 +221,29 @@ model = "opencode/big-pickle"  # Model to use
 ```
 
 For Claude, the default model you should use is "haiku". You can configure the agent and model to your preference.
+
+### Workspace Configuration
+
+```toml
+[workspace]
+# Where workspaces are created. "{repo}" is replaced with the repository
+# directory name. Supports "~" for the home directory and absolute paths;
+# relative paths are resolved against the main worktree root.
+root = "~/gx/workspaces/{repo}"
+
+# Files copied from the main worktree into new workspaces.
+# Paths are relative to the repo root; the filename component may contain
+# "*" / "?" wildcards. Directories are copied recursively, missing entries
+# are skipped.
+copy_files = [".env"]
+```
+
+Example with more setup files:
+
+```toml
+[workspace]
+copy_files = [".env*", "config/local.toml", ".vscode"]
+```
 
 ## License
 

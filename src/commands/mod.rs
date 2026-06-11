@@ -7,3 +7,4 @@ pub mod push;
 pub mod setup;
 pub mod stash;
 pub mod status;
+pub mod workspace;

@@ -83,6 +83,13 @@ pub enum Commands {
         limit: Option<usize>,
     },
 
+    /// Manage workspaces (git worktrees)
+    #[command(alias = "ws")]
+    Workspace {
+        #[command(subcommand)]
+        action: Option<WorkspaceCommands>,
+    },
+
     /// Generate shell aliases from config
     Setup,
 
@@ -144,6 +151,52 @@ pub enum StashCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum WorkspaceCommands {
+    /// Create a new workspace
+    #[command(alias = "create", alias = "add")]
+    New {
+        /// Name of the workspace (also used as the branch name by default)
+        name: String,
+
+        /// Base branch/commit/tag to create the new branch from (defaults to HEAD)
+        base: Option<String>,
+
+        /// Branch to check out in the workspace (created if it doesn't exist)
+        #[arg(short, long)]
+        branch: Option<String>,
+
+        /// Skip copying setup files (e.g. .env) into the new workspace
+        #[arg(long)]
+        no_setup: bool,
+    },
+
+    /// Switch to a workspace (prints its path; cd handled by 'gx setup' shell wrapper)
+    #[command(alias = "switch", alias = "cd")]
+    Go {
+        /// Workspace to switch to (supports fuzzy matching, picker if omitted)
+        query: Option<String>,
+    },
+
+    /// List all workspaces
+    #[command(alias = "ls")]
+    List,
+
+    /// Remove a workspace
+    #[command(alias = "rm", alias = "delete")]
+    Remove {
+        /// Workspace to remove (supports fuzzy matching, picker if omitted)
+        query: Option<String>,
+
+        /// Remove even if the workspace has uncommitted changes
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Copy setup files (e.g. .env) from the main worktree into this workspace
+    Setup,
+}
+
 impl Commands {
     pub fn run(self) -> Result<()> {
         match self {
@@ -180,6 +233,21 @@ impl Commands {
                 }
             },
             Commands::Log { limit } => commands::log::run(limit),
+            Commands::Workspace { action } => match action {
+                None => commands::workspace::run_interactive(),
+                Some(WorkspaceCommands::New {
+                    name,
+                    base,
+                    branch,
+                    no_setup,
+                }) => commands::workspace::run_new(name, base, branch, no_setup),
+                Some(WorkspaceCommands::Go { query }) => commands::workspace::run_go(query),
+                Some(WorkspaceCommands::List) => commands::workspace::run_list(),
+                Some(WorkspaceCommands::Remove { query, force }) => {
+                    commands::workspace::run_remove(query, force)
+                }
+                Some(WorkspaceCommands::Setup) => commands::workspace::run_setup(),
+            },
             Commands::Setup => commands::setup::run(),
         }
     }

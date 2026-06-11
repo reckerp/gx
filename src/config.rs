@@ -59,6 +59,41 @@ pub struct Config {
 
     #[serde(default)]
     pub ai: AiConfig,
+
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Where workspaces are created. `{repo}` is replaced by the repository
+    /// directory name. Supports `~` for the home directory and absolute
+    /// paths; relative paths are resolved against the main worktree root.
+    #[serde(default = "default_workspace_root")]
+    pub root: String,
+
+    /// Files copied from the main worktree into new workspaces (e.g. ".env").
+    /// Paths are relative to the repo root; the filename component may
+    /// contain `*`/`?` wildcards. Missing files are skipped silently.
+    #[serde(default = "default_copy_files")]
+    pub copy_files: Vec<String>,
+}
+
+fn default_workspace_root() -> String {
+    "~/gx/workspaces/{repo}".to_string()
+}
+
+fn default_copy_files() -> Vec<String> {
+    vec![".env".to_string()]
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        WorkspaceConfig {
+            root: default_workspace_root(),
+            copy_files: default_copy_files(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,10 +140,12 @@ impl Default for Config {
         aliases.insert("gp".to_string(), "push".to_string());
         aliases.insert("gst".to_string(), "stash".to_string());
         aliases.insert("gl".to_string(), "log".to_string());
+        aliases.insert("gws".to_string(), "workspace".to_string());
 
         Config {
             aliases,
             ai: AiConfig::default(),
+            workspace: WorkspaceConfig::default(),
         }
     }
 }
@@ -134,6 +171,8 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.ai.agent, "opencode");
         assert_eq!(config.ai.model, "opencode/big-pickle");
+        assert_eq!(config.workspace.root, "~/gx/workspaces/{repo}");
+        assert_eq!(config.workspace.copy_files, vec![".env".to_string()]);
     }
 
     #[test]
