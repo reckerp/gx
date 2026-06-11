@@ -66,8 +66,9 @@ pub struct Config {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
-    /// Where workspaces are created, relative to the main worktree root.
-    /// `{repo}` is replaced by the repository directory name.
+    /// Where workspaces are created. `{repo}` is replaced by the repository
+    /// directory name. Supports `~` for the home directory and absolute
+    /// paths; relative paths are resolved against the main worktree root.
     #[serde(default = "default_workspace_root")]
     pub root: String,
 
@@ -79,7 +80,7 @@ pub struct WorkspaceConfig {
 }
 
 fn default_workspace_root() -> String {
-    "../{repo}-workspaces".to_string()
+    "~/gx/workspaces/{repo}".to_string()
 }
 
 fn default_copy_files() -> Vec<String> {
@@ -169,7 +170,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.ai.agent, "opencode");
         assert_eq!(config.ai.model, "opencode/big-pickle");
-        assert_eq!(config.workspace.root, "../{repo}-workspaces");
+        assert_eq!(config.workspace.root, "~/gx/workspaces/{repo}");
         assert_eq!(config.workspace.copy_files, vec![".env".to_string()]);
     }
 

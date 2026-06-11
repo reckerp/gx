@@ -161,7 +161,7 @@ gx log --limit 10
 
 ### Workspace
 
-Manage workspaces (git worktrees): isolated checkouts of the same repository, each on its own branch. By default workspaces live in a sibling directory `../<repo>-workspaces/<name>`.
+Manage workspaces (git worktrees): isolated checkouts of the same repository, each on its own branch. By default workspaces live in `~/gx/workspaces/<repo>/<name>`.
 
 ```bash
 gx workspace               # Interactive workspace picker (TUI)
@@ -224,9 +224,10 @@ For Claude, the default model you should use is "haiku". You can configure the a
 
 ```toml
 [workspace]
-# Where workspaces are created, relative to the main worktree root.
-# "{repo}" is replaced with the repository directory name.
-root = "../{repo}-workspaces"
+# Where workspaces are created. "{repo}" is replaced with the repository
+# directory name. Supports "~" for the home directory and absolute paths;
+# relative paths are resolved against the main worktree root.
+root = "~/gx/workspaces/{repo}"
 
 # Files copied from the main worktree into new workspaces.
 # Paths are relative to the repo root; the filename component may contain

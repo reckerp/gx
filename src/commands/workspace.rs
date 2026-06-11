@@ -72,7 +72,12 @@ pub fn run_new(
 
     let cfg = config::load()?;
     let main_root = main_worktree_root(&worktrees)?;
-    let path = workspace_path(&main_root, &cfg.workspace.root, &name);
+    let path = workspace_path(
+        &main_root,
+        home_dir().as_deref(),
+        &cfg.workspace.root,
+        &name,
+    );
 
     if path.exists() {
         return Err(WorkspaceError::AlreadyExists(name, path).into());
@@ -330,8 +335,21 @@ fn remove_worktree(worktree: &Worktree, force: bool) -> Result<()> {
 /// Print the path the shell wrapper should cd into. This is the only thing
 /// workspace commands write to stdout.
 fn print_go_path(path: &Path) {
+    use std::io::IsTerminal;
+
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     println!("{}", path.display());
+
+    // When stdout is a terminal, the output is not being captured by the
+    // shell wrapper from 'gx setup', so gx cannot cd for the user.
+    if io::stdout().is_terminal() {
+        eprintln!();
+        eprintln!("hint: gx printed the path but could not cd for you.");
+        eprintln!(
+            "      Add 'eval \"$(gx setup)\"' to your shell config (and use 'gx' from your PATH,"
+        );
+        eprintln!("      not './gx') to switch workspaces automatically.");
+    }
 }
 
 fn main_worktree_root(worktrees: &[Worktree]) -> Result<PathBuf, WorkspaceError> {
@@ -342,14 +360,44 @@ fn main_worktree_root(worktrees: &[Worktree]) -> Result<PathBuf, WorkspaceError>
         .ok_or(WorkspaceError::GitError(GitError::NotInRepo))
 }
 
-fn workspace_path(main_root: &Path, root_template: &str, name: &str) -> PathBuf {
+fn workspace_path(
+    main_root: &Path,
+    home: Option<&Path>,
+    root_template: &str,
+    name: &str,
+) -> PathBuf {
     let repo_name = main_root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".to_string());
 
     let root = root_template.replace("{repo}", &repo_name);
-    main_root.join(root).join(name)
+
+    let root_path = if let Some(home) = home {
+        if root == "~" {
+            home.to_path_buf()
+        } else if let Some(rest) = root.strip_prefix("~/") {
+            home.join(rest)
+        } else {
+            PathBuf::from(&root)
+        }
+    } else {
+        PathBuf::from(&root)
+    };
+
+    let base = if root_path.is_absolute() {
+        root_path
+    } else {
+        main_root.join(root_path)
+    };
+
+    base.join(name)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn validate_name(name: &str) -> Result<(), WorkspaceError> {
@@ -521,6 +569,21 @@ mod tests {
     fn test_workspace_path_default_template() {
         let path = workspace_path(
             Path::new("/home/user/myrepo"),
+            Some(Path::new("/home/user")),
+            "~/gx/workspaces/{repo}",
+            "feature-x",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/gx/workspaces/myrepo/feature-x")
+        );
+    }
+
+    #[test]
+    fn test_workspace_path_relative_template() {
+        let path = workspace_path(
+            Path::new("/home/user/myrepo"),
+            Some(Path::new("/home/user")),
             "../{repo}-workspaces",
             "feature-x",
         );
@@ -532,8 +595,26 @@ mod tests {
 
     #[test]
     fn test_workspace_path_custom_template() {
-        let path = workspace_path(Path::new("/repo"), ".worktrees", "fix");
+        let path = workspace_path(Path::new("/repo"), None, ".worktrees", "fix");
         assert_eq!(path, PathBuf::from("/repo/.worktrees/fix"));
+    }
+
+    #[test]
+    fn test_workspace_path_absolute_template() {
+        let path = workspace_path(
+            Path::new("/repo"),
+            Some(Path::new("/home/user")),
+            "/srv/workspaces/{repo}",
+            "fix",
+        );
+        assert_eq!(path, PathBuf::from("/srv/workspaces/repo/fix"));
+    }
+
+    #[test]
+    fn test_workspace_path_tilde_without_home() {
+        // without a home dir, "~/..." is treated as a relative path
+        let path = workspace_path(Path::new("/repo"), None, "~/ws", "fix");
+        assert_eq!(path, PathBuf::from("/repo/~/ws/fix"));
     }
 
     #[test]
