@@ -29,13 +29,10 @@ pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError>
         return Ok(String::new());
     }
 
-    if options.silent {
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
-    } else {
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-    }
+    // Always capture output so error messages can be reported even in silent mode;
+    // `silent` only suppresses printing below.
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
     let output = cmd.output().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => GitError::NotFound(e),

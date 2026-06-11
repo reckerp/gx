@@ -20,10 +20,19 @@ pub fn get_branches() -> Result<Vec<String>, GitError> {
 
             let name = match branch_type {
                 git2::BranchType::Local => shorthand.to_string(),
-                git2::BranchType::Remote => shorthand
-                    .split_once('/')
-                    .map(|(_, tail)| tail.to_string())
-                    .unwrap_or_else(|| shorthand.to_string()),
+                git2::BranchType::Remote => {
+                    let tail = shorthand
+                        .split_once('/')
+                        .map(|(_, tail)| tail.to_string())
+                        .unwrap_or_else(|| shorthand.to_string());
+
+                    // skip symbolic refs like origin/HEAD, they are not real branches
+                    if tail == "HEAD" {
+                        return None;
+                    }
+
+                    tail
+                }
             };
 
             if seen.insert(name.clone()) {
@@ -230,8 +239,9 @@ pub fn get_remote_name() -> Result<Option<String>, GitError> {
         Err(e) => return Err(e.into()),
     };
 
+    // detached HEAD has no upstream
     if !head.is_branch() {
-        return Err(GitError::NotOnBranch);
+        return Ok(None);
     }
 
     let branch_name = head.shorthand().ok_or(GitError::NotOnBranch)?;

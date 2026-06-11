@@ -312,8 +312,9 @@ fn render_details_pane(f: &mut ratatui::Frame, area: Rect, details: Option<&Comm
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+    if s.chars().count() > max_len {
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     } else {
         s.to_string()
     }

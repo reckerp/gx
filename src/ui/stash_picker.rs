@@ -288,8 +288,9 @@ fn render_action_menu(
 
 fn truncate_message(msg: &str, max_len: usize) -> String {
     let first_line = msg.lines().next().unwrap_or(msg);
-    if first_line.len() > max_len {
-        format!("{}...", &first_line[..max_len - 3])
+    if first_line.chars().count() > max_len {
+        let truncated: String = first_line.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     } else {
         first_line.to_string()
     }

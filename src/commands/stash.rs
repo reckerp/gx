@@ -34,7 +34,13 @@ pub enum StashError {
 pub fn run_push(message: Option<String>, include_untracked: bool) -> Result<()> {
     let (staged, unstaged) = git::status::get_status_files().map_err(StashError::GitError)?;
 
-    if staged.is_empty() && unstaged.is_empty() {
+    // Untracked files (unstaged "New") are only stashable with --untracked
+    let has_stashable_changes = !staged.is_empty()
+        || unstaged
+            .iter()
+            .any(|f| include_untracked || f.status != git::status::FileStatus::New);
+
+    if !has_stashable_changes {
         println!("No local changes to save");
         return Ok(());
     }

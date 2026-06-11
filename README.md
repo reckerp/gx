@@ -108,13 +108,13 @@ Push commits to the remote repository.
 gx push
 gx p
 gx push --force
-gx push --force_dangerously
+gx push --force-dangerously
 ```
 
 **Flags:**
 
 - `-f`, `--force`: Force push with lease (safer)
-- `--force_dangerously`: Force push without lease (dangerous)
+- `--force-dangerously`: Force push without lease (dangerous)
 
 ### Stash
 

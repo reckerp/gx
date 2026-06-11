@@ -16,8 +16,26 @@ pub fn stage_paths(paths: &[String]) -> Result<Vec<String>, GitError> {
             } else {
                 index.add_path(p)?;
             }
-        } else {
+        } else if index.get_path(p, 0).is_some() {
+            // tracked file deleted from the working tree -> stage the deletion
             index.remove_path(p)?;
+        } else {
+            let dir_prefix = format!("{}/", path.trim_end_matches('/'));
+            let has_entries_under = index.iter().any(|entry| {
+                std::str::from_utf8(&entry.path)
+                    .map(|entry_path| entry_path.starts_with(&dir_prefix))
+                    .unwrap_or(false)
+            });
+
+            if has_entries_under {
+                // tracked directory deleted from the working tree
+                index.remove_all([path], None)?;
+            } else {
+                return Err(GitError::CommandFailed(format!(
+                    "pathspec '{}' did not match any files",
+                    path
+                )));
+            }
         }
         staged.push(path.clone());
     }

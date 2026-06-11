@@ -1,6 +1,6 @@
-use crate::git::{branch, commit, fetch, GitError};
+use crate::git::{GitError, branch, commit, fetch};
 use crate::ui;
-use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use miette::{Diagnostic, Result};
 use thiserror::Error;
 

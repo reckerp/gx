@@ -26,7 +26,17 @@ pub fn create_commit(options: CommitOptions) -> Result<String, GitError> {
         args.push(msg.to_string());
     }
 
-    exec(args, ExecOptions::default())
+    // Without a message (and without --no-edit) git opens an editor,
+    // which needs direct access to the terminal.
+    let opens_editor = options.message.is_none() && !options.no_edit;
+
+    exec(
+        args,
+        ExecOptions {
+            inherit: opens_editor,
+            ..Default::default()
+        },
+    )
 }
 
 pub fn create_commit_with_editor(initial_message: &str, amend: bool) -> Result<String, GitError> {
@@ -74,8 +84,13 @@ pub fn checkout_commit(commit_ish: &str) -> Result<String, GitError> {
     let commit = obj.peel_to_commit()?;
     let short_id = commit.as_object().short_id()?;
 
+    // Update the index and working tree first; only move HEAD if that succeeds,
+    // otherwise HEAD ends up pointing at the commit while the files stay stale.
+    repo.checkout_tree(
+        commit.as_object(),
+        Some(git2::build::CheckoutBuilder::default().safe()),
+    )?;
     repo.set_head_detached(commit.id())?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().safe()))?;
 
     Ok(short_id.as_str().unwrap_or(commit_ish).to_string())
 }
