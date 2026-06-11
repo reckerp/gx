@@ -145,11 +145,17 @@ pub fn branch(name: &str, index: usize) -> Result<(), GitError> {
     {
         let parent_commit = repo.find_commit(parent_oid)?;
         repo.branch(name, &parent_commit, false)?;
+
+        // Check out the stash's base commit before moving HEAD so the index
+        // and working tree match the new branch when the stash is re-applied.
+        repo.checkout_tree(
+            parent_commit.as_object(),
+            Some(git2::build::CheckoutBuilder::default().safe()),
+        )?;
     }
 
     let refname = format!("refs/heads/{}", name);
     repo.set_head(&refname)?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().safe()))?;
 
     repo.stash_pop(index, None)?;
 

@@ -74,8 +74,13 @@ pub fn checkout_commit(commit_ish: &str) -> Result<String, GitError> {
     let commit = obj.peel_to_commit()?;
     let short_id = commit.as_object().short_id()?;
 
+    // Update the index and working tree first; only move HEAD if that succeeds,
+    // otherwise HEAD ends up pointing at the commit while the files stay stale.
+    repo.checkout_tree(
+        commit.as_object(),
+        Some(git2::build::CheckoutBuilder::default().safe()),
+    )?;
     repo.set_head_detached(commit.id())?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().safe()))?;
 
     Ok(short_id.as_str().unwrap_or(commit_ish).to_string())
 }
