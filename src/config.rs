@@ -140,6 +140,7 @@ impl Default for Config {
         aliases.insert("gp".to_string(), "push".to_string());
         aliases.insert("gst".to_string(), "stash".to_string());
         aliases.insert("gl".to_string(), "log".to_string());
+        aliases.insert("gws".to_string(), "workspace".to_string());
 
         Config {
             aliases,

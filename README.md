@@ -170,6 +170,8 @@ gx ws                      # Same, shorter
 gx workspace new <name>            # Create workspace + branch <name>, copy setup files
 gx workspace new <name> <base>     # Create the new branch from <base>
 gx workspace new <name> -b <branch> # Check out an existing/specific branch
+# If <name> matches a remote branch (e.g. origin/<name>), the new branch
+# is created from it and set up to track it.
 gx workspace new <name> --no-setup # Skip copying setup files
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)

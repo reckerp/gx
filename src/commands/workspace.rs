@@ -53,6 +53,10 @@ pub enum WorkspaceError {
     #[error("Failed to copy setup file: {0}")]
     #[diagnostic(code(gx::workspace::copy_failed))]
     CopyFailed(#[from] io::Error),
+
+    #[error("Failed to create workspace directory: {0}")]
+    #[diagnostic(code(gx::workspace::create_dir_failed))]
+    CreateDirFailed(io::Error),
 }
 
 /// Create a new workspace (worktree) and print its path to stdout so the
@@ -84,17 +88,47 @@ pub fn run_new(
     }
 
     let branch_name = branch.unwrap_or_else(|| name.clone());
-    let create_branch =
-        !git::worktree::branch_exists(&branch_name).map_err(WorkspaceError::GitError)?;
+    let branch_exists_locally =
+        git::worktree::branch_exists(&branch_name).map_err(WorkspaceError::GitError)?;
+
+    // Resolve what the new branch should start from: an explicit base wins,
+    // otherwise track a matching remote branch (like plain 'git checkout').
+    let mut tracking_remote: Option<String> = None;
+    let (create_branch, base) = if branch_exists_locally {
+        if let Some(base) = &base {
+            eprintln!(
+                "warning: ignoring base '{}'; branch '{}' already exists",
+                base, branch_name
+            );
+        }
+        (false, None)
+    } else {
+        let base = match base {
+            Some(base) => Some(base),
+            None => {
+                tracking_remote = git::worktree::find_remote_branch(&branch_name)
+                    .map_err(WorkspaceError::GitError)?;
+                tracking_remote.clone()
+            }
+        };
+        (true, base)
+    };
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(WorkspaceError::CopyFailed)?;
+        std::fs::create_dir_all(parent).map_err(WorkspaceError::CreateDirFailed)?;
     }
 
     git::worktree::add(&path, &branch_name, create_branch, base.as_deref())
         .map_err(WorkspaceError::GitError)?;
 
-    if create_branch {
+    let path = path.canonicalize().unwrap_or(path);
+
+    if let Some(remote) = &tracking_remote {
+        eprintln!(
+            "Created workspace '{}' on new branch '{}' (tracking '{}')",
+            name, branch_name, remote
+        );
+    } else if create_branch {
         eprintln!(
             "Created workspace '{}' on new branch '{}'",
             name, branch_name
@@ -328,7 +362,13 @@ fn remove_worktree(worktree: &Worktree, force: bool) -> Result<()> {
         Err(e) => return Err(WorkspaceError::GitError(e).into()),
     }
 
-    eprintln!("Removed workspace '{}'", worktree.name);
+    match &worktree.branch {
+        Some(branch) => eprintln!(
+            "Removed workspace '{}' (branch '{}' kept)",
+            worktree.name, branch
+        ),
+        None => eprintln!("Removed workspace '{}'", worktree.name),
+    }
     Ok(())
 }
 
@@ -401,7 +441,13 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn validate_name(name: &str) -> Result<(), WorkspaceError> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+    {
         return Err(WorkspaceError::InvalidName(name.to_string()));
     }
     Ok(())
@@ -473,16 +519,20 @@ fn copy_setup_files(
 
         let has_wildcard = file_pattern.contains('*') || file_pattern.contains('?');
 
+        // never copy .git: in a worktree it is a file pointing at the main
+        // repository, and overwriting it would corrupt the workspace
+        let is_git_meta = |name: &str| dir_part.is_none() && name == ".git";
+
         let matched_names: Vec<String> = if has_wildcard {
             let mut names: Vec<String> = std::fs::read_dir(&src_dir)
                 .map_err(WorkspaceError::CopyFailed)?
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .filter(|name| wildcard_match(file_pattern, name))
+                .filter(|name| wildcard_match(file_pattern, name) && !is_git_meta(name))
                 .collect();
             names.sort();
             names
-        } else if src_dir.join(file_pattern).exists() {
+        } else if !is_git_meta(file_pattern) && src_dir.join(file_pattern).exists() {
             vec![file_pattern.to_string()]
         } else {
             vec![]
@@ -624,6 +674,26 @@ mod tests {
         assert!(validate_name("a/b").is_err());
         assert!(validate_name("..").is_err());
         assert!(validate_name(".").is_err());
+        assert!(validate_name("--force").is_err());
+    }
+
+    #[test]
+    fn test_copy_setup_files_never_copies_git() {
+        let tmp = std::env::temp_dir().join(format!("gx-ws-git-test-{}", std::process::id()));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        std::fs::write(src.join(".gitignore"), "target").unwrap();
+
+        let patterns = vec![".*".to_string(), ".git".to_string()];
+        let copied = copy_setup_files(&src, &dst, &patterns).unwrap();
+
+        assert_eq!(copied, vec![".gitignore".to_string()]);
+        assert!(!dst.join(".git").exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

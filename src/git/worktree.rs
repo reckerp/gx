@@ -103,6 +103,26 @@ pub fn branch_exists(branch_name: &str) -> Result<bool, GitError> {
         .is_ok())
 }
 
+/// Find a remote-tracking branch matching `branch_name` (e.g. "origin/feature"
+/// for "feature"), preferring "origin" when multiple remotes have it.
+pub fn find_remote_branch(branch_name: &str) -> Result<Option<String>, GitError> {
+    let repo = get_repo()?;
+
+    let mut found: Vec<String> = repo
+        .branches(Some(git2::BranchType::Remote))?
+        .filter_map(|res| res.ok())
+        .filter_map(|(branch, _)| branch.get().shorthand().map(|s| s.to_string()))
+        .filter(|shorthand| {
+            shorthand
+                .split_once('/')
+                .is_some_and(|(_, tail)| tail == branch_name)
+        })
+        .collect();
+
+    found.sort_by_key(|r| (!r.starts_with("origin/"), r.clone()));
+    Ok(found.into_iter().next())
+}
+
 fn parse_porcelain(output: &str, current_root: Option<&Path>) -> Vec<Worktree> {
     let current_canonical = current_root.and_then(|p| p.canonicalize().ok());
     let mut worktrees = Vec::new();
