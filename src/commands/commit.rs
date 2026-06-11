@@ -1,8 +1,8 @@
 use crate::config;
 use crate::config::Agent;
 use crate::git;
-use crate::git::commit::CommitOptions;
 use crate::git::GitError;
+use crate::git::commit::CommitOptions;
 use crate::ui;
 use miette::{Diagnostic, Result};
 use std::io::Write;
