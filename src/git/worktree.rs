@@ -164,8 +164,16 @@ pub fn has_tracked_changes(path: &Path) -> Result<bool, GitError> {
     Ok(!output.trim().is_empty())
 }
 
-pub fn remove(path: &Path, force: bool) -> Result<(), GitError> {
-    let mut args = vec!["worktree".to_string(), "remove".to_string()];
+/// Remove the worktree at `path`. Runs git from `from` (the main worktree)
+/// so removal works even when the process is inside the worktree being
+/// removed (git refuses to remove its own current worktree).
+pub fn remove(from: &Path, path: &Path, force: bool) -> Result<(), GitError> {
+    let mut args = vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "remove".to_string(),
+    ];
     if force {
         args.push("--force".to_string());
     }
