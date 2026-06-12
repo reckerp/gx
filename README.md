@@ -171,7 +171,10 @@ gx workspace new <name>            # Create workspace + branch <name>, copy setu
 gx workspace new <name> <base>     # Create the new branch from <base>
 gx workspace new <name> -b <branch> # Check out an existing/specific branch
 # If <name> matches a remote branch (e.g. origin/<name>), the new branch
-# is created from it and set up to track it.
+# is created from it and set up to track it. Otherwise the new branch is
+# created from origin's default branch (e.g. origin/main).
+# Names may contain '/' (e.g. feat/expose-rationale); the branch keeps the
+# '/' while the workspace directory uses '-' (feat-expose-rationale).
 gx workspace new <name> --no-setup # Skip copying setup files
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)

@@ -69,9 +69,13 @@ pub fn run_new(
 ) -> Result<()> {
     validate_name(&name)?;
 
+    // Branch names may contain '/' (e.g. 'feat/expose-rationale'), but the
+    // workspace directory must be a single path component.
+    let dir_name = directory_name(&name);
+
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
-    if let Some(existing) = worktrees.iter().find(|w| w.name == name) {
-        return Err(WorkspaceError::AlreadyExists(name, existing.path.clone()).into());
+    if let Some(existing) = worktrees.iter().find(|w| w.name == dir_name) {
+        return Err(WorkspaceError::AlreadyExists(dir_name, existing.path.clone()).into());
     }
 
     let cfg = config::load()?;
@@ -80,11 +84,11 @@ pub fn run_new(
         &main_root,
         home_dir().as_deref(),
         &cfg.workspace.root,
-        &name,
+        &dir_name,
     );
 
     if path.exists() {
-        return Err(WorkspaceError::AlreadyExists(name, path).into());
+        return Err(WorkspaceError::AlreadyExists(dir_name, path).into());
     }
 
     let branch_name = branch.unwrap_or_else(|| name.clone());
@@ -92,8 +96,10 @@ pub fn run_new(
         git::worktree::branch_exists(&branch_name).map_err(WorkspaceError::GitError)?;
 
     // Resolve what the new branch should start from: an explicit base wins,
-    // otherwise track a matching remote branch (like plain 'git checkout').
+    // then a matching remote branch (like plain 'git checkout'), otherwise
+    // the default branch of origin (e.g. 'origin/main') instead of HEAD.
     let mut tracking_remote: Option<String> = None;
+    let mut default_base: Option<String> = None;
     let (create_branch, base) = if branch_exists_locally {
         if let Some(base) = &base {
             eprintln!(
@@ -108,7 +114,14 @@ pub fn run_new(
             None => {
                 tracking_remote = git::worktree::find_remote_branch(&branch_name)
                     .map_err(WorkspaceError::GitError)?;
-                tracking_remote.clone()
+                match tracking_remote.clone() {
+                    Some(remote) => Some(remote),
+                    None => {
+                        default_base = git::worktree::default_remote_branch()
+                            .map_err(WorkspaceError::GitError)?;
+                        default_base.clone()
+                    }
+                }
             }
         };
         (true, base)
@@ -118,25 +131,39 @@ pub fn run_new(
         std::fs::create_dir_all(parent).map_err(WorkspaceError::CreateDirFailed)?;
     }
 
-    git::worktree::add(&path, &branch_name, create_branch, base.as_deref())
-        .map_err(WorkspaceError::GitError)?;
+    // When branching off the default remote branch, don't set it as upstream:
+    // the new branch should push to its own name, not e.g. origin/main.
+    let no_track = default_base.is_some();
+    git::worktree::add(
+        &path,
+        &branch_name,
+        create_branch,
+        base.as_deref(),
+        no_track,
+    )
+    .map_err(WorkspaceError::GitError)?;
 
     let path = path.canonicalize().unwrap_or(path);
 
     if let Some(remote) = &tracking_remote {
         eprintln!(
             "Created workspace '{}' on new branch '{}' (tracking '{}')",
-            name, branch_name, remote
+            dir_name, branch_name, remote
+        );
+    } else if let Some(default_base) = &default_base {
+        eprintln!(
+            "Created workspace '{}' on new branch '{}' (from '{}')",
+            dir_name, branch_name, default_base
         );
     } else if create_branch {
         eprintln!(
             "Created workspace '{}' on new branch '{}'",
-            name, branch_name
+            dir_name, branch_name
         );
     } else {
         eprintln!(
             "Created workspace '{}' on existing branch '{}'",
-            name, branch_name
+            dir_name, branch_name
         );
     }
     eprintln!("  {}", path.display());
@@ -440,17 +467,26 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Workspace names double as branch names, so '/' is allowed (e.g.
+/// 'feat/expose-rationale'); the directory name flattens it via
+/// [`directory_name`]. Empty segments and '.'/'..' segments are rejected.
 fn validate_name(name: &str) -> Result<(), WorkspaceError> {
     if name.is_empty()
         || name.starts_with('-')
-        || name.contains('/')
         || name.contains('\\')
-        || name == "."
-        || name == ".."
+        || name
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
         return Err(WorkspaceError::InvalidName(name.to_string()));
     }
     Ok(())
+}
+
+/// Directory name for a workspace: '/' in the name (valid in branch names)
+/// is replaced with '-' so the workspace stays a single path component.
+fn directory_name(name: &str) -> String {
+    name.replace('/', "-")
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -670,11 +706,28 @@ mod tests {
     #[test]
     fn test_validate_name() {
         assert!(validate_name("feature-x").is_ok());
+        assert!(validate_name("feat/expose-rationale").is_ok());
+        assert!(validate_name("a/b/c").is_ok());
         assert!(validate_name("").is_err());
-        assert!(validate_name("a/b").is_err());
         assert!(validate_name("..").is_err());
         assert!(validate_name(".").is_err());
         assert!(validate_name("--force").is_err());
+        assert!(validate_name("/a").is_err());
+        assert!(validate_name("a/").is_err());
+        assert!(validate_name("a//b").is_err());
+        assert!(validate_name("a/../b").is_err());
+        assert!(validate_name("a/./b").is_err());
+        assert!(validate_name("a\\b").is_err());
+    }
+
+    #[test]
+    fn test_directory_name() {
+        assert_eq!(directory_name("feature-x"), "feature-x");
+        assert_eq!(
+            directory_name("feat/expose-rationale"),
+            "feat-expose-rationale"
+        );
+        assert_eq!(directory_name("a/b/c"), "a-b-c");
     }
 
     #[test]

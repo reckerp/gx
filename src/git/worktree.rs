@@ -47,15 +47,21 @@ pub fn current_worktree_root() -> Result<PathBuf, GitError> {
 
 /// Add a new worktree at `path` checking out `branch`.
 /// When `create_branch` is true the branch is created (optionally from `base`).
+/// `no_track` prevents the new branch from tracking a remote `base` (useful
+/// when branching off e.g. 'origin/main' without wanting it as upstream).
 pub fn add(
     path: &Path,
     branch: &str,
     create_branch: bool,
     base: Option<&str>,
+    no_track: bool,
 ) -> Result<(), GitError> {
     let mut args = vec!["worktree".to_string(), "add".to_string()];
 
     if create_branch {
+        if no_track {
+            args.push("--no-track".to_string());
+        }
         args.push("-b".to_string());
         args.push(branch.to_string());
         args.push(path.display().to_string());
@@ -121,6 +127,32 @@ pub fn find_remote_branch(branch_name: &str) -> Result<Option<String>, GitError>
 
     found.sort_by_key(|r| (!r.starts_with("origin/"), r.clone()));
     Ok(found.into_iter().next())
+}
+
+/// Default branch of the 'origin' remote (e.g. "origin/main"), resolved from
+/// 'refs/remotes/origin/HEAD' with a fallback to origin/main or origin/master.
+/// Returns None when there is no origin remote.
+pub fn default_remote_branch() -> Result<Option<String>, GitError> {
+    let repo = get_repo()?;
+
+    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Some(target) = head.symbolic_target()
+        && let Some(branch) = target.strip_prefix("refs/remotes/")
+    {
+        return Ok(Some(branch.to_string()));
+    }
+
+    // origin/HEAD is only set on clone; fall back to common default names
+    for candidate in ["origin/main", "origin/master"] {
+        if repo
+            .find_branch(candidate, git2::BranchType::Remote)
+            .is_ok()
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 fn parse_porcelain(output: &str, current_root: Option<&Path>) -> Vec<Worktree> {
