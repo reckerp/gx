@@ -184,6 +184,17 @@ pub enum WorkspaceCommands {
     #[command(alias = "ls")]
     List,
 
+    /// Update a workspace: fetch origin and rebase its branch onto
+    /// origin's default branch (e.g. origin/main)
+    #[command(alias = "up", alias = "sync")]
+    Update {
+        /// Workspace to update (defaults to the current one)
+        query: Option<String>,
+
+        /// Base to rebase onto (defaults to origin's default branch)
+        base: Option<String>,
+    },
+
     /// Remove a workspace
     #[command(alias = "rm", alias = "delete")]
     Remove {
@@ -245,6 +256,9 @@ impl Commands {
                 }) => commands::workspace::run_new(name, base, branch, no_setup),
                 Some(WorkspaceCommands::Go { query }) => commands::workspace::run_go(query),
                 Some(WorkspaceCommands::List) => commands::workspace::run_list(),
+                Some(WorkspaceCommands::Update { query, base }) => {
+                    commands::workspace::run_update(query, base)
+                }
                 Some(WorkspaceCommands::Remove { query, force }) => {
                     commands::workspace::run_remove(query, force)
                 }

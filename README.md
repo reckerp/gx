@@ -170,15 +170,20 @@ gx ws                      # Same, shorter
 gx workspace new <name>            # Create workspace + branch <name>, copy setup files
 gx workspace new <name> <base>     # Create the new branch from <base>
 gx workspace new <name> -b <branch> # Check out an existing/specific branch
-# If <name> matches a remote branch (e.g. origin/<name>), the new branch
-# is created from it and set up to track it. Otherwise the new branch is
-# created from origin's default branch (e.g. origin/main).
+# Origin is fetched first, then: if <name> matches a remote branch
+# (e.g. origin/<name>), the new branch is created from it and set up to
+# track it. Otherwise the new branch is created from origin's default
+# branch (e.g. origin/main).
 # Names may contain '/' (e.g. feat/expose-rationale); the branch keeps the
 # '/' while the workspace directory uses '-' (feat-expose-rationale).
 gx workspace new <name> --no-setup # Skip copying setup files
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)
 gx workspace list          # List all workspaces
+gx workspace update [query]        # Fetch origin and rebase the workspace's branch
+                                   # onto origin's default branch (current workspace
+                                   # if no query)
+gx workspace update [query] <base> # Rebase onto <base> instead
 gx workspace remove [query] # Remove a workspace (asks for confirmation)
 gx workspace remove <name> --force # Remove even with uncommitted changes
 gx workspace setup         # Re-copy setup files from the main worktree into this one

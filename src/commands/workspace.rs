@@ -50,6 +50,33 @@ pub enum WorkspaceError {
     #[diagnostic(code(gx::workspace::invalid_name))]
     InvalidName(String),
 
+    #[error("Workspace '{0}' has uncommitted changes")]
+    #[diagnostic(
+        code(gx::workspace::dirty),
+        help("Commit or stash your changes before updating")
+    )]
+    Dirty(String),
+
+    #[error("Workspace '{0}' is not on a branch (detached HEAD)")]
+    #[diagnostic(code(gx::workspace::detached_head))]
+    DetachedHead(String),
+
+    #[error("Could not determine a base branch to update against")]
+    #[diagnostic(
+        code(gx::workspace::no_base),
+        help("Pass a base explicitly, e.g. 'gx workspace update <workspace> origin/main'")
+    )]
+    NoBase,
+
+    #[error("Rebase failed: {0}")]
+    #[diagnostic(
+        code(gx::workspace::rebase_failed),
+        help(
+            "Resolve the conflicts and run 'git rebase --continue', or 'git rebase --abort' to undo"
+        )
+    )]
+    RebaseFailed(String),
+
     #[error("Failed to copy setup file: {0}")]
     #[diagnostic(code(gx::workspace::copy_failed))]
     CopyFailed(#[from] io::Error),
@@ -109,6 +136,11 @@ pub fn run_new(
         }
         (false, None)
     } else {
+        // Refresh origin's remote-tracking refs first so the new branch starts
+        // from the actual state of origin (e.g. origin/main), not a stale
+        // local snapshot from the last fetch.
+        fetch_origin();
+
         let base = match base {
             Some(base) => Some(base),
             None => {
@@ -270,6 +302,66 @@ pub fn run_remove(query: Option<String>, force: bool) -> Result<()> {
     };
 
     remove_worktree(&target, force)
+}
+
+/// Bring a workspace up to date by fetching origin and rebasing its branch
+/// onto a base (origin's default branch, e.g. 'origin/main', by default).
+/// Updates the current workspace unless a query selects another one.
+pub fn run_update(query: Option<String>, base: Option<String>) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+
+    let target = match query {
+        Some(q) => fuzzy_match_worktree(&q, &worktrees)
+            .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?,
+        None => worktrees
+            .iter()
+            .find(|w| w.is_current)
+            .cloned()
+            .ok_or(WorkspaceError::GitError(GitError::NotInRepo))?,
+    };
+
+    let Some(branch) = target.branch.clone() else {
+        return Err(WorkspaceError::DetachedHead(target.name.clone()).into());
+    };
+
+    if git::worktree::has_tracked_changes(&target.path).map_err(WorkspaceError::GitError)? {
+        return Err(WorkspaceError::Dirty(target.name.clone()).into());
+    }
+
+    fetch_origin();
+
+    let base = match base {
+        Some(base) => base,
+        None => git::worktree::default_remote_branch()
+            .map_err(WorkspaceError::GitError)?
+            .ok_or(WorkspaceError::NoBase)?,
+    };
+
+    eprintln!("Rebasing '{}' onto '{}'...", branch, base);
+    git::worktree::rebase_onto(&target.path, &base)
+        .map_err(|e| WorkspaceError::RebaseFailed(e.to_string()))?;
+
+    eprintln!(
+        "Updated workspace '{}': '{}' is now up to date with '{}'",
+        target.name, branch, base
+    );
+    Ok(())
+}
+
+/// Fetch origin (when it exists) so remote-tracking refs are current.
+/// Failures (e.g. offline) are reported as a warning instead of aborting,
+/// since the locally known refs may still be good enough.
+fn fetch_origin() {
+    match git::fetch::has_remote("origin") {
+        Ok(true) => {
+            eprintln!("Fetching origin...");
+            if let Err(e) = git::fetch::fetch_remote("origin") {
+                eprintln!("warning: fetch failed ({}); using local refs", e);
+            }
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: could not check remotes ({})", e),
+    }
 }
 
 /// Re-copy setup files (e.g. .env) from the main worktree into the current
