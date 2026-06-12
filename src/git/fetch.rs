@@ -1,5 +1,5 @@
 use crate::git::{
-    GitError,
+    GitError, get_repo,
     git_exec::{self, ExecOptions},
 };
 
@@ -14,4 +14,21 @@ pub fn fetch() -> Result<(), GitError> {
         },
     )?;
     Ok(())
+}
+
+/// Fetch a specific remote (e.g. "origin") to refresh its remote-tracking refs.
+pub fn fetch_remote(remote: &str) -> Result<(), GitError> {
+    git_exec::exec(
+        vec!["fetch".to_string(), remote.to_string()],
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+pub fn has_remote(name: &str) -> Result<bool, GitError> {
+    let repo = get_repo()?;
+    Ok(repo.find_remote(name).is_ok())
 }

@@ -127,6 +127,43 @@ pub fn add(
     Ok(())
 }
 
+/// Rebase the branch checked out in the worktree at `path` onto `base`
+/// (e.g. 'origin/main'). Runs in the worktree via 'git -C'.
+pub fn rebase_onto(path: &Path, base: &str) -> Result<(), GitError> {
+    git_exec::exec(
+        vec![
+            "-C".to_string(),
+            path.display().to_string(),
+            "rebase".to_string(),
+            base.to_string(),
+        ],
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// True when the worktree at `path` has staged or unstaged changes to
+/// tracked files (untracked files don't block a rebase, so they're ignored).
+pub fn has_tracked_changes(path: &Path) -> Result<bool, GitError> {
+    let output = git_exec::exec(
+        vec![
+            "-C".to_string(),
+            path.display().to_string(),
+            "status".to_string(),
+            "--porcelain".to_string(),
+            "--untracked-files=no".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(!output.trim().is_empty())
+}
+
 pub fn remove(path: &Path, force: bool) -> Result<(), GitError> {
     let mut args = vec!["worktree".to_string(), "remove".to_string()];
     if force {
