@@ -184,7 +184,9 @@ gx workspace update [query]        # Fetch origin and rebase the workspace's bra
                                    # onto origin's default branch (current workspace
                                    # if no query)
 gx workspace update [query] <base> # Rebase onto <base> instead
-gx workspace remove [query] # Remove a workspace (asks for confirmation)
+gx workspace remove [query] # Remove a workspace (asks for confirmation).
+                            # Removing the workspace you are in moves you
+                            # to the main workspace first.
 gx workspace remove <name> --force # Remove even with uncommitted changes
 gx workspace setup         # Re-copy setup files from the main worktree into this one
 ```

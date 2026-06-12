@@ -39,13 +39,6 @@ pub enum WorkspaceError {
     )]
     RemoveMain,
 
-    #[error("Cannot remove the workspace you are currently in")]
-    #[diagnostic(
-        code(gx::workspace::remove_current),
-        help("Switch to another workspace first, e.g. 'gx workspace go'")
-    )]
-    RemoveCurrent,
-
     #[error("Invalid workspace name: {0}")]
     #[diagnostic(code(gx::workspace::invalid_name))]
     InvalidName(String),
@@ -226,7 +219,7 @@ pub fn run_go(query: Option<String>) -> Result<()> {
             };
             match action {
                 WorkspaceAction::Go(w) => w,
-                WorkspaceAction::Remove(w) => return remove_worktree(&w, false),
+                WorkspaceAction::Remove(w) => return remove_worktree(&w, &worktrees, false),
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
         }
@@ -301,7 +294,7 @@ pub fn run_remove(query: Option<String>, force: bool) -> Result<()> {
         }
     };
 
-    remove_worktree(&target, force)
+    remove_worktree(&target, &worktrees, force)
 }
 
 /// Bring a workspace up to date by fetching origin and rebasing its branch
@@ -408,7 +401,7 @@ pub fn run_interactive() -> Result<()> {
             print_go_path(&w.path);
             Ok(())
         }
-        WorkspaceAction::Remove(w) => remove_worktree(&w, false),
+        WorkspaceAction::Remove(w) => remove_worktree(&w, &worktrees, false),
         WorkspaceAction::Create { name } => create_from_picker(name),
     }
 }
@@ -443,25 +436,33 @@ fn create_from_picker(name: String) -> Result<()> {
     run_new(name, None, None, false)
 }
 
-fn remove_worktree(worktree: &Worktree, force: bool) -> Result<()> {
+fn remove_worktree(worktree: &Worktree, worktrees: &[Worktree], force: bool) -> Result<()> {
     if worktree.is_main {
         return Err(WorkspaceError::RemoveMain.into());
     }
-    if worktree.is_current {
-        return Err(WorkspaceError::RemoveCurrent.into());
-    }
 
-    let confirmed = ui::confirm::run_on_stderr(&format!(
-        "Remove workspace '{}' ({})?",
-        worktree.name,
-        worktree.path.display()
-    ))?;
+    let main_root = main_worktree_root(worktrees)?;
+
+    let prompt = if worktree.is_current {
+        format!(
+            "Remove current workspace '{}' ({})? You will be moved to the main workspace.",
+            worktree.name,
+            worktree.path.display()
+        )
+    } else {
+        format!(
+            "Remove workspace '{}' ({})?",
+            worktree.name,
+            worktree.path.display()
+        )
+    };
+    let confirmed = ui::confirm::run_on_stderr(&prompt)?;
     if !confirmed {
         eprintln!("Cancelled");
         return Ok(());
     }
 
-    match git::worktree::remove(&worktree.path, force) {
+    match git::worktree::remove(&main_root, &worktree.path, force) {
         Ok(()) => {}
         // copied setup files (e.g. .env) are untracked, so offer a force
         // removal instead of failing outright
@@ -476,7 +477,8 @@ fn remove_worktree(worktree: &Worktree, force: bool) -> Result<()> {
                 eprintln!("Cancelled");
                 return Ok(());
             }
-            git::worktree::remove(&worktree.path, true).map_err(WorkspaceError::GitError)?;
+            git::worktree::remove(&main_root, &worktree.path, true)
+                .map_err(WorkspaceError::GitError)?;
         }
         Err(e) => return Err(WorkspaceError::GitError(e).into()),
     }
@@ -487,6 +489,13 @@ fn remove_worktree(worktree: &Worktree, force: bool) -> Result<()> {
             worktree.name, branch
         ),
         None => eprintln!("Removed workspace '{}'", worktree.name),
+    }
+
+    // The user's shell is inside the removed directory; send them to the
+    // main workspace via the shell wrapper.
+    if worktree.is_current {
+        eprintln!("Switching to main workspace");
+        print_go_path(&main_root);
     }
     Ok(())
 }
