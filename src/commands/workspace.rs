@@ -2,7 +2,7 @@ use crate::config;
 use crate::git::{self, GitError, worktree::Worktree};
 use crate::ui;
 use crate::ui::workspace_picker::WorkspaceAction;
-use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::{Diagnostic, Result};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ pub fn run_new(
 
     // Branch names may contain '/' (e.g. 'feat/expose-rationale'), but the
     // workspace directory must be a single path component.
-    let dir_name = directory_name(&name);
+    let dir_name = git::worktree::flatten_slashes(&name);
 
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
     if let Some(existing) = worktrees.iter().find(|w| w.name == dir_name) {
@@ -469,7 +469,8 @@ fn home_dir() -> Option<PathBuf> {
 
 /// Workspace names double as branch names, so '/' is allowed (e.g.
 /// 'feat/expose-rationale'); the directory name flattens it via
-/// [`directory_name`]. Empty segments and '.'/'..' segments are rejected.
+/// [`git::worktree::flatten_slashes`]. Empty segments and '.'/'..'
+/// segments are rejected.
 fn validate_name(name: &str) -> Result<(), WorkspaceError> {
     if name.is_empty()
         || name.starts_with('-')
@@ -481,12 +482,6 @@ fn validate_name(name: &str) -> Result<(), WorkspaceError> {
         return Err(WorkspaceError::InvalidName(name.to_string()));
     }
     Ok(())
-}
-
-/// Directory name for a workspace: '/' in the name (valid in branch names)
-/// is replaced with '-' so the workspace stays a single path component.
-fn directory_name(name: &str) -> String {
-    name.replace('/', "-")
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
@@ -502,21 +497,10 @@ fn fuzzy_match_worktree(query: &str, worktrees: &[Worktree]) -> Option<Worktree>
     worktrees
         .iter()
         .filter_map(|w| {
-            if w.name.eq_ignore_ascii_case(query) {
-                return Some((i64::MAX, w)); // prioritize exact name matches
+            if w.matches_exactly(query) {
+                return Some((i64::MAX, w)); // prioritize exact name/branch matches
             }
-
-            let name_score = matcher.fuzzy_match(&w.name, query);
-            let branch_score = w
-                .branch
-                .as_deref()
-                .and_then(|b| matcher.fuzzy_match(b, query));
-
-            name_score
-                .into_iter()
-                .chain(branch_score)
-                .max()
-                .map(|score| (score, w))
+            w.match_score(&matcher, query).map(|score| (score, w))
         })
         .max_by_key(|(score, _)| *score)
         .map(|(_, w)| w.clone())
@@ -720,14 +704,46 @@ mod tests {
         assert!(validate_name("a\\b").is_err());
     }
 
+    fn worktree(name: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            name: name.to_string(),
+            path: PathBuf::from(format!("/ws/{}", name)),
+            branch: branch.map(|b| b.to_string()),
+            head: None,
+            is_main: false,
+            is_current: false,
+            is_bare: false,
+            is_locked: false,
+        }
+    }
+
     #[test]
-    fn test_directory_name() {
-        assert_eq!(directory_name("feature-x"), "feature-x");
-        assert_eq!(
-            directory_name("feat/expose-rationale"),
-            "feat-expose-rationale"
-        );
-        assert_eq!(directory_name("a/b/c"), "a-b-c");
+    fn test_fuzzy_match_worktree_slash_and_dash() {
+        let worktrees = vec![
+            worktree("repo", Some("main")),
+            worktree("feat-expose-rationale", Some("feat/expose-rationale")),
+            worktree("custom-dir", Some("fix/null-check")),
+        ];
+
+        // slash and dash forms both resolve a workspace exactly,
+        // whether they match the directory name or the branch
+        for (query, expected) in [
+            ("feat/expose-rationale", "feat-expose-rationale"),
+            ("feat-expose-rationale", "feat-expose-rationale"),
+            ("fix/null-check", "custom-dir"),
+            ("fix-null-check", "custom-dir"),
+        ] {
+            let m = fuzzy_match_worktree(query, &worktrees).unwrap();
+            assert_eq!(m.name, expected, "query '{}'", query);
+        }
+
+        // partial queries fuzzy match across the '/'-'-' boundary
+        let m = fuzzy_match_worktree("feat/expo", &worktrees).unwrap();
+        assert_eq!(m.name, "feat-expose-rationale");
+        let m = fuzzy_match_worktree("fix-null", &worktrees).unwrap();
+        assert_eq!(m.name, "custom-dir");
+
+        assert!(fuzzy_match_worktree("nonexistent-xyz", &worktrees).is_none());
     }
 
     #[test]
