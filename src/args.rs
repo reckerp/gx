@@ -156,10 +156,12 @@ pub enum WorkspaceCommands {
     /// Create a new workspace
     #[command(alias = "create", alias = "add")]
     New {
-        /// Name of the workspace (also used as the branch name by default)
+        /// Name of the workspace (also used as the branch name by default;
+        /// '/' is replaced with '-' in the directory name)
         name: String,
 
-        /// Base branch/commit/tag to create the new branch from (defaults to HEAD)
+        /// Base branch/commit/tag to create the new branch from (defaults to
+        /// the matching remote branch, then origin's default branch, then HEAD)
         base: Option<String>,
 
         /// Branch to check out in the workspace (created if it doesn't exist)

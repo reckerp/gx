@@ -1,5 +1,6 @@
 use super::{GitError, get_repo};
 use crate::git::git_exec::{self, ExecOptions};
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,48 @@ pub struct Worktree {
     pub is_current: bool,
     pub is_bare: bool,
     pub is_locked: bool,
+}
+
+/// Replace '/' with '-': branch names may contain '/', workspace directory
+/// names may not, so the two are treated as interchangeable when matching.
+pub fn flatten_slashes(name: &str) -> String {
+    name.replace('/', "-")
+}
+
+impl Worktree {
+    /// True when `query` is exactly the worktree's name or branch,
+    /// treating '/' and '-' as interchangeable.
+    pub fn matches_exactly(&self, query: &str) -> bool {
+        let query = flatten_slashes(query);
+        self.name.eq_ignore_ascii_case(&query)
+            || self
+                .branch
+                .as_deref()
+                .is_some_and(|b| flatten_slashes(b).eq_ignore_ascii_case(&query))
+    }
+
+    /// Fuzzy score of `query` against the worktree's name and branch, with
+    /// '/' and '-' interchangeable: 'feat/x' matches directory 'feat-x' and
+    /// 'feat-x' matches branch 'feat/x'.
+    pub fn match_score(&self, matcher: &SkimMatcherV2, query: &str) -> Option<i64> {
+        let flattened = flatten_slashes(query);
+
+        let name_score = matcher
+            .fuzzy_match(&self.name, query)
+            .into_iter()
+            .chain(matcher.fuzzy_match(&self.name, &flattened))
+            .max();
+
+        let branch_score = self.branch.as_deref().and_then(|b| {
+            matcher
+                .fuzzy_match(b, query)
+                .into_iter()
+                .chain(matcher.fuzzy_match(&flatten_slashes(b), &flattened))
+                .max()
+        });
+
+        name_score.into_iter().chain(branch_score).max()
+    }
 }
 
 /// List all worktrees of the repository. The main worktree is always first.
@@ -47,15 +90,21 @@ pub fn current_worktree_root() -> Result<PathBuf, GitError> {
 
 /// Add a new worktree at `path` checking out `branch`.
 /// When `create_branch` is true the branch is created (optionally from `base`).
+/// `no_track` prevents the new branch from tracking a remote `base` (useful
+/// when branching off e.g. 'origin/main' without wanting it as upstream).
 pub fn add(
     path: &Path,
     branch: &str,
     create_branch: bool,
     base: Option<&str>,
+    no_track: bool,
 ) -> Result<(), GitError> {
     let mut args = vec!["worktree".to_string(), "add".to_string()];
 
     if create_branch {
+        if no_track {
+            args.push("--no-track".to_string());
+        }
         args.push("-b".to_string());
         args.push(branch.to_string());
         args.push(path.display().to_string());
@@ -121,6 +170,32 @@ pub fn find_remote_branch(branch_name: &str) -> Result<Option<String>, GitError>
 
     found.sort_by_key(|r| (!r.starts_with("origin/"), r.clone()));
     Ok(found.into_iter().next())
+}
+
+/// Default branch of the 'origin' remote (e.g. "origin/main"), resolved from
+/// 'refs/remotes/origin/HEAD' with a fallback to origin/main or origin/master.
+/// Returns None when there is no origin remote.
+pub fn default_remote_branch() -> Result<Option<String>, GitError> {
+    let repo = get_repo()?;
+
+    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Some(target) = head.symbolic_target()
+        && let Some(branch) = target.strip_prefix("refs/remotes/")
+    {
+        return Ok(Some(branch.to_string()));
+    }
+
+    // origin/HEAD is only set on clone; fall back to common default names
+    for candidate in ["origin/main", "origin/master"] {
+        if repo
+            .find_branch(candidate, git2::BranchType::Remote)
+            .is_ok()
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 fn parse_porcelain(output: &str, current_root: Option<&Path>) -> Vec<Worktree> {
@@ -230,5 +305,63 @@ mod tests {
     #[test]
     fn test_parse_porcelain_empty() {
         assert!(parse_porcelain("", None).is_empty());
+    }
+
+    fn worktree(name: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            name: name.to_string(),
+            path: PathBuf::from(format!("/ws/{}", name)),
+            branch: branch.map(|b| b.to_string()),
+            head: None,
+            is_main: false,
+            is_current: false,
+            is_bare: false,
+            is_locked: false,
+        }
+    }
+
+    #[test]
+    fn test_flatten_slashes() {
+        assert_eq!(flatten_slashes("feature-x"), "feature-x");
+        assert_eq!(
+            flatten_slashes("feat/expose-rationale"),
+            "feat-expose-rationale"
+        );
+        assert_eq!(flatten_slashes("a/b/c"), "a-b-c");
+    }
+
+    #[test]
+    fn test_matches_exactly() {
+        let w = worktree("feat-expose-rationale", Some("feat/expose-rationale"));
+        assert!(w.matches_exactly("feat-expose-rationale"));
+        assert!(w.matches_exactly("feat/expose-rationale"));
+        assert!(w.matches_exactly("FEAT/EXPOSE-RATIONALE"));
+        assert!(!w.matches_exactly("feat/expose"));
+
+        // workspace dir differs from branch: both still match exactly
+        let w = worktree("custom-dir", Some("fix/null-check"));
+        assert!(w.matches_exactly("custom-dir"));
+        assert!(w.matches_exactly("fix/null-check"));
+        assert!(w.matches_exactly("fix-null-check"));
+
+        let detached = worktree("hotfix", None);
+        assert!(detached.matches_exactly("hotfix"));
+        assert!(!detached.matches_exactly("fix/null-check"));
+    }
+
+    #[test]
+    fn test_match_score_slash_dash_interchangeable() {
+        let matcher = SkimMatcherV2::default();
+        let w = worktree("feat-expose-rationale", Some("feat/expose-rationale"));
+
+        assert!(w.match_score(&matcher, "feat/expo").is_some());
+        assert!(w.match_score(&matcher, "feat-expo").is_some());
+        assert!(w.match_score(&matcher, "expose").is_some());
+        assert!(w.match_score(&matcher, "zzz-no-match").is_none());
+
+        // dash query against a slash-only branch on a differently named dir
+        let w = worktree("custom-dir", Some("fix/null-check"));
+        assert!(w.match_score(&matcher, "fix-null").is_some());
+        assert!(w.match_score(&matcher, "fix/null").is_some());
     }
 }

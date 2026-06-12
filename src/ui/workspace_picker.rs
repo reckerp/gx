@@ -1,7 +1,6 @@
 use super::{TermStderr, render_help_bar};
 use crate::git::worktree::Worktree;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::IntoDiagnostic;
 use ratatui::prelude::*;
@@ -26,18 +25,7 @@ fn filter_worktrees(worktrees: &[Worktree], query: &str) -> Vec<Worktree> {
     let matcher = SkimMatcherV2::default();
     let mut matches: Vec<_> = worktrees
         .iter()
-        .filter_map(|w| {
-            let name_score = matcher.fuzzy_match(&w.name, query);
-            let branch_score = w
-                .branch
-                .as_deref()
-                .and_then(|b| matcher.fuzzy_match(b, query));
-            name_score
-                .into_iter()
-                .chain(branch_score)
-                .max()
-                .map(|score| (score, w))
-        })
+        .filter_map(|w| w.match_score(&matcher, query).map(|score| (score, w)))
         .collect();
 
     matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));

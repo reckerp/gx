@@ -1,10 +1,17 @@
+use crossterm::cursor::MoveToColumn;
 use crossterm::event::{self, Event, KeyCode};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::queue;
+use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use miette::IntoDiagnostic;
-use ratatui::prelude::*;
-use ratatui::widgets::*;
-use ratatui::{TerminalOptions, Viewport};
 use std::io::{self, Write};
+
+// The prompt is rendered with plain ANSI on the given writer instead of a
+// ratatui inline viewport: inline viewports read the cursor position, and
+// crossterm writes that query to stdout. When stdout is captured (e.g. by
+// the 'gx setup' shell wrapper doing cd "$(gx ws ...)") the query never
+// reaches the terminal and the read times out with "The cursor position
+// could not be read within a normal duration".
 
 pub fn run(message: &str) -> miette::Result<bool> {
     let mut stdout = io::stdout();
@@ -19,69 +26,71 @@ pub fn run_on_stderr(message: &str) -> miette::Result<bool> {
 }
 
 fn run_inner<W: Write>(message: &str, writer: &mut W) -> miette::Result<bool> {
-    let backend = CrosstermBackend::new(writer);
-    let mut terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(1),
-        },
-    )
-    .into_diagnostic()?;
-
     enable_raw_mode().into_diagnostic()?;
+    let result = prompt(message, writer);
+    disable_raw_mode().ok();
+    writeln!(writer).ok();
+    result
+}
 
+fn prompt<W: Write>(message: &str, writer: &mut W) -> miette::Result<bool> {
     let mut selected = 0; // 0 = Yes, 1 = No
 
     loop {
-        terminal
-            .draw(|f| {
-                let area = f.area();
-
-                let yes_style = if selected == 0 {
-                    Style::default().fg(Color::Black).bg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Green)
-                };
-
-                let no_style = if selected == 1 {
-                    Style::default().fg(Color::Black).bg(Color::Red)
-                } else {
-                    Style::default().fg(Color::Red)
-                };
-
-                let line = Line::from(vec![
-                    Span::styled(format!("{} ", message), Style::default().fg(Color::Yellow)),
-                    Span::styled(" y ", yes_style),
-                    Span::raw(" "),
-                    Span::styled(" n ", no_style),
-                    Span::styled("  (y/n)", Style::default().fg(Color::DarkGray)),
-                ]);
-
-                f.render_widget(Paragraph::new(line), area);
-            })
-            .into_diagnostic()?;
+        render(message, selected, writer).into_diagnostic()?;
 
         if let Event::Key(key) = event::read().into_diagnostic()? {
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') => selected = 0,
                 KeyCode::Right | KeyCode::Char('l') => selected = 1,
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    disable_raw_mode().ok();
-                    eprintln!();
-                    return Ok(true);
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    disable_raw_mode().ok();
-                    eprintln!();
-                    return Ok(false);
-                }
-                KeyCode::Enter => {
-                    disable_raw_mode().ok();
-                    eprintln!();
-                    return Ok(selected == 0);
-                }
+                KeyCode::Char('y' | 'Y') => return Ok(true),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => return Ok(false),
+                KeyCode::Enter => return Ok(selected == 0),
                 _ => {}
             }
         }
     }
+}
+
+fn render<W: Write>(message: &str, selected: usize, writer: &mut W) -> io::Result<()> {
+    queue!(
+        writer,
+        MoveToColumn(0),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(Color::Yellow),
+        Print(message),
+        Print("  "),
+        ResetColor,
+    )?;
+
+    if selected == 0 {
+        queue!(
+            writer,
+            SetForegroundColor(Color::Black),
+            SetBackgroundColor(Color::Green)
+        )?;
+    } else {
+        queue!(writer, SetForegroundColor(Color::Green))?;
+    }
+    queue!(writer, Print(" y "), ResetColor, Print(" "))?;
+
+    if selected == 1 {
+        queue!(
+            writer,
+            SetForegroundColor(Color::Black),
+            SetBackgroundColor(Color::Red)
+        )?;
+    } else {
+        queue!(writer, SetForegroundColor(Color::Red))?;
+    }
+    queue!(
+        writer,
+        Print(" n "),
+        ResetColor,
+        SetForegroundColor(Color::DarkGrey),
+        Print("  (y/n)"),
+        ResetColor
+    )?;
+
+    writer.flush()
 }
