@@ -642,20 +642,18 @@ mod tests {
     #[test]
     fn test_glob_parts_match_supports_recursive_glob() {
         assert!(glob_parts_match(&["**", ".env.local"], &[".env.local"]));
-        assert!(glob_parts_match(&["**", ".env.local"], &[
-            "apps",
-            "web",
-            ".env.local"
-        ]));
-        assert!(glob_parts_match(&["*", ".env.local"], &[
-            "apps",
-            ".env.local"
-        ]));
-        assert!(!glob_parts_match(&["*", ".env.local"], &[
-            "apps",
-            "web",
-            ".env.local"
-        ]));
+        assert!(glob_parts_match(
+            &["**", ".env.local"],
+            &["apps", "web", ".env.local"]
+        ));
+        assert!(glob_parts_match(
+            &["*", ".env.local"],
+            &["apps", ".env.local"]
+        ));
+        assert!(!glob_parts_match(
+            &["*", ".env.local"],
+            &["apps", "web", ".env.local"]
+        ));
     }
 
     #[test]
@@ -700,12 +698,15 @@ mod tests {
         ];
         let copied = copy_setup_files(&src, &dst, &patterns).unwrap();
 
-        assert_eq!(copied, vec![
-            ".env.local".to_string(),
-            "apps/web/.env.local".to_string(),
-            ".env".to_string(),
-            ".vercel".to_string()
-        ]);
+        assert_eq!(
+            copied,
+            vec![
+                ".env.local".to_string(),
+                "apps/web/.env.local".to_string(),
+                ".env".to_string(),
+                ".vercel".to_string()
+            ]
+        );
         assert_eq!(
             std::fs::read_to_string(dst.join(".env")).unwrap(),
             "SECRET=1"
