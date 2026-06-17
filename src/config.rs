@@ -73,8 +73,9 @@ pub struct WorkspaceConfig {
     pub root: String,
 
     /// Files copied from the main worktree into new workspaces (e.g. ".env").
-    /// Paths are relative to the repo root; the filename component may
-    /// contain `*`/`?` wildcards. Missing files are skipped silently.
+    /// Paths are relative to the repo root; `*`/`?` match within one path
+    /// component and `**` matches zero or more components. Missing files are
+    /// skipped silently.
     #[serde(default = "default_copy_files")]
     pub copy_files: Vec<String>,
 }

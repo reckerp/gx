@@ -40,6 +40,7 @@ cargo run -- <arguments>
 | `stash`    | `st`           | Stash changes                       |
 | `log`      | `l`            | View commit history                 |
 | `workspace`| `ws`           | Manage workspaces (git worktrees)   |
+| `onboarding`| `onboard`    | Configure repo-specific setup       |
 | `setup`    | -              | Generate shell aliases from config  |
 
 ### Checkout
@@ -167,7 +168,7 @@ Manage workspaces (git worktrees): isolated checkouts of the same repository, ea
 gx workspace               # Interactive workspace picker (TUI)
 gx ws                      # Same, shorter
 
-gx workspace new <name>            # Create workspace + branch <name>, copy setup files
+gx workspace new <name>            # Create workspace + branch <name>, run setup
 gx workspace new <name> <base>     # Create the new branch from <base>
 gx workspace new <name> -b <branch> # Check out an existing/specific branch
 # Origin is fetched first, then: if <name> matches a remote branch
@@ -176,7 +177,7 @@ gx workspace new <name> -b <branch> # Check out an existing/specific branch
 # branch (e.g. origin/main).
 # Names may contain '/' (e.g. feat/expose-rationale); the branch keeps the
 # '/' while the workspace directory uses '-' (feat-expose-rationale).
-gx workspace new <name> --no-setup # Skip copying setup files
+gx workspace new <name> --no-setup # Skip copying setup files and setup script
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)
 gx workspace list          # List all workspaces
@@ -188,14 +189,32 @@ gx workspace remove [query] # Remove a workspace (asks for confirmation).
                             # Removing the workspace you are in moves you
                             # to the main workspace first.
 gx workspace remove <name> --force # Remove even with uncommitted changes
-gx workspace setup         # Re-copy setup files from the main worktree into this one
+gx workspace setup         # Re-run setup: copy files, then run setup script
 ```
 
 **Interactive TUI** (`gx workspace`): fuzzy search across workspace names and branches, with `enter` to switch, `ctrl+n` to create a workspace named after the current query, and `ctrl+d` to remove the selection.
 
 **Changing directories:** a child process can't change your shell's directory, so `cd`-on-switch is handled by the shell wrapper emitted by `gx setup`. With `eval "$(gx setup)"` in your shell config, `gx workspace go`, `gx workspace new`, and the TUI will land you directly in the workspace. Without it, the workspace path is printed so you can `cd "$(gx workspace go <query>)"` yourself.
 
-**Setup files:** files like `.env` are usually gitignored, so a fresh worktree doesn't have them. When creating a workspace, gx copies the files configured in `workspace.copy_files` from the main worktree into the new one (missing files are skipped). See [Workspace Configuration](#workspace-configuration).
+**Setup files:** files like `.env` are usually gitignored, so a fresh worktree doesn't have them. When creating a workspace, gx copies the files configured in `workspace.copy_files` and the current repo's onboarding config from the main worktree into the new one (missing files are skipped), then runs the repo-specific setup script when one is configured. The setup script runs from the workspace root. If it fails, gx warns and still switches into the workspace. See [Workspace Configuration](#workspace-configuration) and [Repo Onboarding](#repo-onboarding).
+
+### Repo Onboarding
+
+Configure setup that belongs to the current repository:
+
+```bash
+gx onboarding
+gx onboard
+```
+
+The onboarding TUI lets you select repo files/directories to copy into each new workspace, then asks whether to define a setup script. If you choose yes, gx creates an executable `setup.sh` under `~/.config/gx/repos/<repo>/` and opens it with `$VISUAL`, `$EDITOR`, or `vi`.
+
+Repo onboarding config is stored outside the repository under `~/.config/gx/repos/`. It is shared by all git worktrees from the same repository, matching Git's worktree behavior. The script is saved outside the repo but executed with the new workspace root as the current directory, so it can contain commands like:
+
+```bash
+npm install
+npx vercel link
+```
 
 ### Setup
 
@@ -242,9 +261,9 @@ For Claude, the default model you should use is "haiku". You can configure the a
 root = "~/gx/workspaces/{repo}"
 
 # Files copied from the main worktree into new workspaces.
-# Paths are relative to the repo root; the filename component may contain
-# "*" / "?" wildcards. Directories are copied recursively, missing entries
-# are skipped.
+# Paths are relative to the repo root. "*" / "?" match within one path
+# component; "**" matches zero or more path components. Directories are
+# copied recursively, missing entries are skipped.
 copy_files = [".env"]
 ```
 
@@ -252,7 +271,7 @@ Example with more setup files:
 
 ```toml
 [workspace]
-copy_files = [".env*", "config/local.toml", ".vscode"]
+copy_files = [".env*", "**/.env.local", "config/local.toml", ".vscode"]
 ```
 
 ## License
