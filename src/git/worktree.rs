@@ -1,6 +1,7 @@
 use super::{GitError, get_repo};
 use crate::git::git_exec::{self, ExecOptions};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,25 @@ pub struct Worktree {
     pub is_current: bool,
     pub is_bare: bool,
     pub is_locked: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeSummary {
+    pub tracked_changes: usize,
+    pub untracked_changes: usize,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
+    pub status_error: bool,
+}
+
+impl WorktreeSummary {
+    pub fn has_changes(&self) -> bool {
+        self.tracked_changes > 0 || self.untracked_changes > 0
+    }
+
+    pub fn has_unpushed_commits(&self) -> bool {
+        self.ahead.unwrap_or(0) > 0
+    }
 }
 
 /// Replace '/' with '-': branch names may contain '/', workspace directory
@@ -190,6 +210,115 @@ pub fn remove(from: &Path, path: &Path, force: bool) -> Result<(), GitError> {
     Ok(())
 }
 
+pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), GitError> {
+    let delete_flag = if force { "-D" } else { "-d" };
+    git_exec::exec(
+        vec![
+            "-C".to_string(),
+            from.display().to_string(),
+            "branch".to_string(),
+            delete_flag.to_string(),
+            branch_name.to_string(),
+        ],
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
+    worktrees
+        .iter()
+        .map(|worktree| {
+            let summary = summarize(worktree).unwrap_or_else(|_| WorktreeSummary {
+                status_error: true,
+                ..Default::default()
+            });
+            (worktree.path.clone(), summary)
+        })
+        .collect()
+}
+
+pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
+    let status_output = git_exec::exec(
+        vec![
+            "-C".to_string(),
+            worktree.path.display().to_string(),
+            "status".to_string(),
+            "--porcelain".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+
+    let (tracked_changes, untracked_changes) = parse_status_counts(&status_output);
+    let (ahead, behind) = match worktree.branch {
+        Some(_) => ahead_behind(&worktree.path).unwrap_or((None, None)),
+        None => (None, None),
+    };
+
+    Ok(WorktreeSummary {
+        tracked_changes,
+        untracked_changes,
+        ahead,
+        behind,
+        status_error: false,
+    })
+}
+
+fn parse_status_counts(output: &str) -> (usize, usize) {
+    output.lines().fold((0, 0), |(tracked, untracked), line| {
+        if line.starts_with("??") {
+            (tracked, untracked + 1)
+        } else if line.trim().is_empty() {
+            (tracked, untracked)
+        } else {
+            (tracked + 1, untracked)
+        }
+    })
+}
+
+fn ahead_behind(path: &Path) -> Result<(Option<usize>, Option<usize>), GitError> {
+    git_exec::exec(
+        vec![
+            "-C".to_string(),
+            path.display().to_string(),
+            "rev-parse".to_string(),
+            "--abbrev-ref".to_string(),
+            "--symbolic-full-name".to_string(),
+            "@{upstream}".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+
+    let output = git_exec::exec(
+        vec![
+            "-C".to_string(),
+            path.display().to_string(),
+            "rev-list".to_string(),
+            "--left-right".to_string(),
+            "--count".to_string(),
+            "@{upstream}...HEAD".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+
+    let mut counts = output.split_whitespace();
+    let behind = counts.next().and_then(|n| n.parse::<usize>().ok());
+    let ahead = counts.next().and_then(|n| n.parse::<usize>().ok());
+    Ok((ahead, behind))
+}
+
 pub fn branch_exists(branch_name: &str) -> Result<bool, GitError> {
     let repo = get_repo()?;
     Ok(repo
@@ -350,6 +479,15 @@ mod tests {
     #[test]
     fn test_parse_porcelain_empty() {
         assert!(parse_porcelain("", None).is_empty());
+    }
+
+    #[test]
+    fn test_parse_status_counts() {
+        let output = " M src/main.rs\nA  src/new.rs\n?? scratch.txt\n?? notes/todo.md\n";
+        let (tracked, untracked) = parse_status_counts(output);
+
+        assert_eq!(tracked, 2);
+        assert_eq!(untracked, 2);
     }
 
     fn worktree(name: &str, branch: Option<&str>) -> Worktree {
