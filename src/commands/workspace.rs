@@ -1,12 +1,14 @@
-use crate::config;
 use crate::git::{self, GitError, worktree::Worktree};
+use crate::repo_setup::ScriptRun;
 use crate::ui;
 use crate::ui::workspace_picker::WorkspaceAction;
+use crate::{config, repo_setup};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::{Diagnostic, Result};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use thiserror::Error;
 
 #[derive(Error, Debug, Diagnostic)]
@@ -195,10 +197,9 @@ pub fn run_new(
     eprintln!("  {}", path.display());
 
     if !no_setup {
-        let copied = copy_setup_files(&main_root, &path, &cfg.workspace.copy_files)?;
-        for file in &copied {
-            eprintln!("  copied {}", file);
-        }
+        let report =
+            repo_setup::run_setup_pipeline(&main_root, &path, &cfg.workspace.copy_files, true)?;
+        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
     }
 
     print_go_path(&path);
@@ -372,8 +373,8 @@ fn fetch_origin() {
     }
 }
 
-/// Re-copy setup files (e.g. .env) from the main worktree into the current
-/// workspace.
+/// Re-run setup for the current workspace: copy setup files first, then run
+/// the repo-specific setup script when one is configured.
 pub fn run_setup() -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
     let current = git::worktree::current_worktree_root().map_err(WorkspaceError::GitError)?;
@@ -521,26 +522,62 @@ fn setup_worktrees(worktrees_to_setup: &[Worktree], all_worktrees: &[Worktree]) 
 
     for target in &targets {
         if paths_equal(&main_root, &target.path) {
-            eprintln!("Skipping main worktree '{}'; nothing to copy", target.name);
+            eprintln!(
+                "Skipping main worktree '{}'; nothing to set up",
+                target.name
+            );
             continue;
         }
 
-        let copied = copy_setup_files(&main_root, &target.path, &cfg.workspace.copy_files)?;
+        let report = repo_setup::run_setup_pipeline(
+            &main_root,
+            &target.path,
+            &cfg.workspace.copy_files,
+            true,
+        )?;
 
-        if copied.is_empty() {
-            eprintln!(
-                "No setup files copied into '{}' (configured: {:?})",
-                target.name, cfg.workspace.copy_files
-            );
-        } else {
-            eprintln!("Copied setup files into '{}':", target.name);
-            for file in &copied {
-                eprintln!("  copied {}", file);
-            }
-        }
+        eprintln!("Setup for '{}':", target.name);
+        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
     }
 
     Ok(())
+}
+
+fn print_setup_report(report: &repo_setup::SetupReport, prefix: &str, configured: &[String]) {
+    if report.copied.is_empty() {
+        if matches!(report.script, ScriptRun::Skipped) {
+            eprintln!(
+                "{}No setup files to copy (configured: {:?})",
+                prefix, configured
+            );
+        }
+    } else {
+        for file in &report.copied {
+            eprintln!("{}copied {}", prefix, file);
+        }
+    }
+
+    match &report.script {
+        ScriptRun::Skipped => {}
+        ScriptRun::Succeeded(path) => {
+            eprintln!("{}ran setup script {}", prefix, path.display());
+        }
+        ScriptRun::Failed { path, status } => {
+            eprintln!(
+                "{}warning: setup script {} failed with status {}; continuing",
+                prefix,
+                path.display(),
+                display_exit_status(status)
+            );
+        }
+    }
+}
+
+fn display_exit_status(status: &ExitStatus) -> String {
+    status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
 fn remove_worktrees(
@@ -811,134 +848,9 @@ fn fuzzy_match_worktree(query: &str, worktrees: &[Worktree]) -> Option<Worktree>
         .map(|(_, w)| w.clone())
 }
 
-/// Copy configured setup files from `src_root` to `dst_root`.
-/// Patterns are relative paths; the filename component may contain `*`/`?`
-/// wildcards. Directories are copied recursively. Missing sources are
-/// skipped. Returns the relative paths that were copied.
-fn copy_setup_files(
-    src_root: &Path,
-    dst_root: &Path,
-    patterns: &[String],
-) -> Result<Vec<String>, WorkspaceError> {
-    let mut copied = Vec::new();
-
-    for pattern in patterns {
-        let pattern = pattern.trim_matches('/');
-        if pattern.is_empty() {
-            continue;
-        }
-
-        let (dir_part, file_pattern) = match pattern.rsplit_once('/') {
-            Some((dir, file)) => (Some(dir), file),
-            None => (None, pattern),
-        };
-
-        let src_dir = match dir_part {
-            Some(dir) => src_root.join(dir),
-            None => src_root.to_path_buf(),
-        };
-
-        if !src_dir.is_dir() {
-            continue;
-        }
-
-        let has_wildcard = file_pattern.contains('*') || file_pattern.contains('?');
-
-        // never copy .git: in a worktree it is a file pointing at the main
-        // repository, and overwriting it would corrupt the workspace
-        let is_git_meta = |name: &str| dir_part.is_none() && name == ".git";
-
-        let matched_names: Vec<String> = if has_wildcard {
-            let mut names: Vec<String> = std::fs::read_dir(&src_dir)
-                .map_err(WorkspaceError::CopyFailed)?
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.file_name().to_string_lossy().to_string())
-                .filter(|name| wildcard_match(file_pattern, name) && !is_git_meta(name))
-                .collect();
-            names.sort();
-            names
-        } else if !is_git_meta(file_pattern) && src_dir.join(file_pattern).exists() {
-            vec![file_pattern.to_string()]
-        } else {
-            vec![]
-        };
-
-        for name in matched_names {
-            let rel_path = match dir_part {
-                Some(dir) => format!("{}/{}", dir, name),
-                None => name.clone(),
-            };
-            let src = src_root.join(&rel_path);
-            let dst = dst_root.join(&rel_path);
-
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).map_err(WorkspaceError::CopyFailed)?;
-            }
-
-            if src.is_dir() {
-                copy_dir_recursive(&src, &dst)?;
-            } else {
-                std::fs::copy(&src, &dst).map_err(WorkspaceError::CopyFailed)?;
-            }
-
-            copied.push(rel_path);
-        }
-    }
-
-    Ok(copied)
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
-    std::fs::create_dir_all(dst).map_err(WorkspaceError::CopyFailed)?;
-
-    for entry in std::fs::read_dir(src).map_err(WorkspaceError::CopyFailed)? {
-        let entry = entry.map_err(WorkspaceError::CopyFailed)?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).map_err(WorkspaceError::CopyFailed)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Simple wildcard matcher supporting `*` (any sequence) and `?` (any char).
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-
-    fn matches(p: &[char], t: &[char]) -> bool {
-        match (p.first(), t.first()) {
-            (None, None) => true,
-            (Some('*'), _) => matches(&p[1..], t) || (!t.is_empty() && matches(p, &t[1..])),
-            (Some('?'), Some(_)) => matches(&p[1..], &t[1..]),
-            (Some(pc), Some(tc)) if pc == tc => matches(&p[1..], &t[1..]),
-            _ => false,
-        }
-    }
-
-    matches(&p, &t)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_wildcard_match() {
-        assert!(wildcard_match(".env", ".env"));
-        assert!(wildcard_match(".env*", ".env"));
-        assert!(wildcard_match(".env*", ".env.local"));
-        assert!(wildcard_match("*.local", ".env.local"));
-        assert!(wildcard_match("?env", ".env"));
-        assert!(!wildcard_match(".env", ".env.local"));
-        assert!(!wildcard_match(".env?", ".env"));
-        assert!(!wildcard_match("*.toml", ".env"));
-    }
 
     #[test]
     fn test_workspace_path_default_template() {
@@ -1082,64 +994,5 @@ mod tests {
         let prompt = remove_prompt(&[feature], true);
 
         assert!(prompt.contains("delete its local branch"));
-    }
-
-    #[test]
-    fn test_copy_setup_files_never_copies_git() {
-        let tmp = std::env::temp_dir().join(format!("gx-ws-git-test-{}", std::process::id()));
-        let src = tmp.join("src");
-        let dst = tmp.join("dst");
-        std::fs::create_dir_all(src.join(".git")).unwrap();
-        std::fs::create_dir_all(&dst).unwrap();
-        std::fs::write(src.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
-        std::fs::write(src.join(".gitignore"), "target").unwrap();
-
-        let patterns = vec![".*".to_string(), ".git".to_string()];
-        let copied = copy_setup_files(&src, &dst, &patterns).unwrap();
-
-        assert_eq!(copied, vec![".gitignore".to_string()]);
-        assert!(!dst.join(".git").exists());
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn test_copy_setup_files() {
-        let tmp = std::env::temp_dir().join(format!("gx-ws-test-{}", std::process::id()));
-        let src = tmp.join("src");
-        let dst = tmp.join("dst");
-        std::fs::create_dir_all(src.join("config")).unwrap();
-        std::fs::create_dir_all(&dst).unwrap();
-
-        std::fs::write(src.join(".env"), "SECRET=1").unwrap();
-        std::fs::write(src.join(".env.local"), "LOCAL=1").unwrap();
-        std::fs::write(src.join("config/dev.toml"), "[dev]").unwrap();
-
-        let patterns = vec![
-            ".env*".to_string(),
-            "config/dev.toml".to_string(),
-            "missing.txt".to_string(),
-        ];
-        let copied = copy_setup_files(&src, &dst, &patterns).unwrap();
-
-        assert_eq!(
-            copied,
-            vec![
-                ".env".to_string(),
-                ".env.local".to_string(),
-                "config/dev.toml".to_string()
-            ]
-        );
-        assert_eq!(
-            std::fs::read_to_string(dst.join(".env")).unwrap(),
-            "SECRET=1"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dst.join("config/dev.toml")).unwrap(),
-            "[dev]"
-        );
-        assert!(!dst.join("missing.txt").exists());
-
-        std::fs::remove_dir_all(&tmp).ok();
     }
 }

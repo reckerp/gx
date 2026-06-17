@@ -90,6 +90,10 @@ pub enum Commands {
         action: Option<WorkspaceCommands>,
     },
 
+    /// Configure repo-specific workspace setup
+    #[command(alias = "onboard")]
+    Onboarding,
+
     /// Generate shell aliases from config
     Setup,
 
@@ -250,6 +254,7 @@ impl Commands {
                 }
             },
             Commands::Log { limit } => commands::log::run(limit),
+            Commands::Onboarding => commands::onboarding::run(),
             Commands::Workspace { action } => match action {
                 None => commands::workspace::run_interactive(),
                 Some(WorkspaceCommands::New {

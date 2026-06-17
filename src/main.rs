@@ -2,6 +2,7 @@ mod args;
 mod commands;
 mod config;
 mod git;
+mod repo_setup;
 mod ui;
 
 use clap::Parser;

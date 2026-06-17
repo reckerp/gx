@@ -108,6 +108,24 @@ pub fn current_worktree_root() -> Result<PathBuf, GitError> {
         .ok_or(GitError::NotInRepo)
 }
 
+/// Path to Git's shared metadata directory for this repository. Linked
+/// worktrees from the same repository return the same common directory.
+pub fn common_git_dir() -> Result<PathBuf, GitError> {
+    let output = git_exec::exec(
+        vec![
+            "rev-parse".to_string(),
+            "--path-format=absolute".to_string(),
+            "--git-common-dir".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+
+    Ok(PathBuf::from(output))
+}
+
 /// Add a new worktree at `path` checking out `branch`.
 /// When `create_branch` is true the branch is created (optionally from `base`).
 /// `no_track` prevents the new branch from tracking a remote `base` (useful
