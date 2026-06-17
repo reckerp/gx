@@ -4,6 +4,7 @@ use crate::ui;
 use crate::ui::workspace_picker::WorkspaceAction;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::{Diagnostic, Result};
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -219,7 +220,9 @@ pub fn run_go(query: Option<String>) -> Result<()> {
             };
             match action {
                 WorkspaceAction::Go(w) => w,
-                WorkspaceAction::Remove(w) => return remove_worktree(&w, &worktrees, false),
+                WorkspaceAction::Remove(worktrees_to_remove) => {
+                    return remove_worktrees(&worktrees_to_remove, &worktrees, false);
+                }
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
         }
@@ -278,9 +281,11 @@ pub fn run_list() -> Result<()> {
 pub fn run_remove(query: Option<String>, force: bool) -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
 
-    let target = match query {
-        Some(q) => fuzzy_match_worktree(&q, &worktrees)
-            .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?,
+    let targets = match query {
+        Some(q) => vec![
+            fuzzy_match_worktree(&q, &worktrees)
+                .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?,
+        ],
         None => {
             let Some(action) = pick_workspace(&worktrees)? else {
                 eprintln!("Cancelled");
@@ -288,13 +293,14 @@ pub fn run_remove(query: Option<String>, force: bool) -> Result<()> {
             };
             match action {
                 // in remove context both Go and Remove target the selection
-                WorkspaceAction::Go(w) | WorkspaceAction::Remove(w) => w,
+                WorkspaceAction::Go(w) => vec![w],
+                WorkspaceAction::Remove(worktrees_to_remove) => worktrees_to_remove,
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
         }
     };
 
-    remove_worktree(&target, &worktrees, force)
+    remove_worktrees(&targets, &worktrees, force)
 }
 
 /// Bring a workspace up to date by fetching origin and rebasing its branch
@@ -401,7 +407,9 @@ pub fn run_interactive() -> Result<()> {
             print_go_path(&w.path);
             Ok(())
         }
-        WorkspaceAction::Remove(w) => remove_worktree(&w, &worktrees, false),
+        WorkspaceAction::Remove(worktrees_to_remove) => {
+            remove_worktrees(&worktrees_to_remove, &worktrees, false)
+        }
         WorkspaceAction::Create { name } => create_from_picker(name),
     }
 }
@@ -436,68 +444,113 @@ fn create_from_picker(name: String) -> Result<()> {
     run_new(name, None, None, false)
 }
 
-fn remove_worktree(worktree: &Worktree, worktrees: &[Worktree], force: bool) -> Result<()> {
-    if worktree.is_main {
+fn remove_worktrees(
+    worktrees_to_remove: &[Worktree],
+    all_worktrees: &[Worktree],
+    force: bool,
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    let mut targets: Vec<Worktree> = worktrees_to_remove
+        .iter()
+        .filter(|w| seen.insert(w.path.clone()))
+        .cloned()
+        .collect();
+
+    if targets.is_empty() {
+        eprintln!("No workspaces selected");
+        return Ok(());
+    }
+
+    if targets.iter().any(|w| w.is_main) {
         return Err(WorkspaceError::RemoveMain.into());
     }
 
-    let main_root = main_worktree_root(worktrees)?;
+    // If the current workspace is selected, remove it last so failures in
+    // other workspaces do not leave the user's shell inside a deleted path.
+    targets.sort_by_key(|w| w.is_current);
 
-    let prompt = if worktree.is_current {
-        format!(
-            "Remove current workspace '{}' ({})? You will be moved to the main workspace.",
-            worktree.name,
-            worktree.path.display()
-        )
-    } else {
-        format!(
-            "Remove workspace '{}' ({})?",
-            worktree.name,
-            worktree.path.display()
-        )
-    };
+    let main_root = main_worktree_root(all_worktrees)?;
+
+    let prompt = remove_prompt(&targets);
     let confirmed = ui::confirm::run_on_stderr(&prompt)?;
     if !confirmed {
         eprintln!("Cancelled");
         return Ok(());
     }
 
-    match git::worktree::remove(&main_root, &worktree.path, force) {
-        Ok(()) => {}
-        // copied setup files (e.g. .env) are untracked, so offer a force
-        // removal instead of failing outright
-        Err(GitError::CommandFailed(msg))
-            if !force && msg.contains("contains modified or untracked files") =>
-        {
-            let confirmed = ui::confirm::run_on_stderr(&format!(
-                "Workspace '{}' has modified or untracked files. Remove anyway?",
-                worktree.name
-            ))?;
-            if !confirmed {
-                eprintln!("Cancelled");
-                return Ok(());
-            }
-            git::worktree::remove(&main_root, &worktree.path, true)
-                .map_err(WorkspaceError::GitError)?;
-        }
-        Err(e) => return Err(WorkspaceError::GitError(e).into()),
-    }
+    let removes_current = targets.iter().any(|w| w.is_current);
 
-    match &worktree.branch {
-        Some(branch) => eprintln!(
-            "Removed workspace '{}' (branch '{}' kept)",
-            worktree.name, branch
-        ),
-        None => eprintln!("Removed workspace '{}'", worktree.name),
+    for worktree in &targets {
+        match git::worktree::remove(&main_root, &worktree.path, force) {
+            Ok(()) => {}
+            // copied setup files (e.g. .env) are untracked, so offer a force
+            // removal instead of failing outright
+            Err(GitError::CommandFailed(msg))
+                if !force && msg.contains("contains modified or untracked files") =>
+            {
+                let confirmed = ui::confirm::run_on_stderr(&format!(
+                    "Workspace '{}' has modified or untracked files. Remove anyway?",
+                    worktree.name
+                ))?;
+                if !confirmed {
+                    eprintln!("Cancelled");
+                    return Ok(());
+                }
+                git::worktree::remove(&main_root, &worktree.path, true)
+                    .map_err(WorkspaceError::GitError)?;
+            }
+            Err(e) => return Err(WorkspaceError::GitError(e).into()),
+        }
+
+        match &worktree.branch {
+            Some(branch) => eprintln!(
+                "Removed workspace '{}' (branch '{}' kept)",
+                worktree.name, branch
+            ),
+            None => eprintln!("Removed workspace '{}'", worktree.name),
+        }
     }
 
     // The user's shell is inside the removed directory; send them to the
     // main workspace via the shell wrapper.
-    if worktree.is_current {
+    if removes_current {
         eprintln!("Switching to main workspace");
         print_go_path(&main_root);
     }
     Ok(())
+}
+
+fn remove_prompt(worktrees_to_remove: &[Worktree]) -> String {
+    if let [worktree] = worktrees_to_remove {
+        return if worktree.is_current {
+            format!(
+                "Remove current workspace '{}' ({})? You will be moved to the main workspace.",
+                worktree.name,
+                worktree.path.display()
+            )
+        } else {
+            format!(
+                "Remove workspace '{}' ({})?",
+                worktree.name,
+                worktree.path.display()
+            )
+        };
+    }
+
+    let mut lines = vec![format!("Remove {} workspaces?", worktrees_to_remove.len())];
+    if worktrees_to_remove.iter().any(|w| w.is_current) {
+        lines.push(
+            "The current workspace is selected; you will be moved to the main workspace."
+                .to_string(),
+        );
+    }
+    lines.push(String::new());
+    lines.extend(
+        worktrees_to_remove
+            .iter()
+            .map(|w| format!("  - {} ({})", w.name, w.path.display())),
+    );
+    lines.join("\n")
 }
 
 /// Print the path the shell wrapper should cd into. This is the only thing
@@ -845,6 +898,31 @@ mod tests {
         assert_eq!(m.name, "custom-dir");
 
         assert!(fuzzy_match_worktree("nonexistent-xyz", &worktrees).is_none());
+    }
+
+    #[test]
+    fn test_remove_prompt_lists_multiple_workspaces() {
+        let feature = worktree("feature", Some("feature"));
+        let fix = worktree("fix", Some("fix"));
+
+        let prompt = remove_prompt(&[feature, fix]);
+
+        assert!(prompt.contains("Remove 2 workspaces?"));
+        assert!(prompt.contains("  - feature (/ws/feature)"));
+        assert!(prompt.contains("  - fix (/ws/fix)"));
+    }
+
+    #[test]
+    fn test_remove_prompt_notes_current_workspace() {
+        let feature = worktree("feature", Some("feature"));
+        let mut current = worktree("current", Some("current"));
+        current.is_current = true;
+
+        let prompt = remove_prompt(&[feature, current]);
+
+        assert!(prompt.contains(
+            "The current workspace is selected; you will be moved to the main workspace."
+        ));
     }
 
     #[test]
