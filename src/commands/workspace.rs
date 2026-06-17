@@ -221,8 +221,24 @@ pub fn run_go(query: Option<String>) -> Result<()> {
             };
             match action {
                 WorkspaceAction::Go(w) => w,
-                WorkspaceAction::Remove(worktrees_to_remove) => {
-                    return remove_worktrees(&worktrees_to_remove, &worktrees, false);
+                WorkspaceAction::Remove {
+                    worktrees: worktrees_to_remove,
+                    delete_branches,
+                    confirmed,
+                } => {
+                    return remove_worktrees(
+                        &worktrees_to_remove,
+                        &worktrees,
+                        false,
+                        delete_branches,
+                        confirmed,
+                    );
+                }
+                WorkspaceAction::Update(worktrees_to_update) => {
+                    return update_worktrees(&worktrees_to_update, None);
+                }
+                WorkspaceAction::Setup(worktrees_to_setup) => {
+                    return setup_worktrees(&worktrees_to_setup, &worktrees);
                 }
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
@@ -279,7 +295,7 @@ pub fn run_list() -> Result<()> {
     Ok(())
 }
 
-pub fn run_remove(query: Option<String>, force: bool) -> Result<()> {
+pub fn run_remove(query: Option<String>, force: bool, delete_branch: bool) -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
 
     let targets = match query {
@@ -295,13 +311,31 @@ pub fn run_remove(query: Option<String>, force: bool) -> Result<()> {
             match action {
                 // in remove context both Go and Remove target the selection
                 WorkspaceAction::Go(w) => vec![w],
-                WorkspaceAction::Remove(worktrees_to_remove) => worktrees_to_remove,
+                WorkspaceAction::Remove {
+                    worktrees: worktrees_to_remove,
+                    delete_branches,
+                    confirmed,
+                } => {
+                    return remove_worktrees(
+                        &worktrees_to_remove,
+                        &worktrees,
+                        force,
+                        delete_branches || delete_branch,
+                        confirmed,
+                    );
+                }
+                WorkspaceAction::Update(worktrees_to_update) => {
+                    return update_worktrees(&worktrees_to_update, None);
+                }
+                WorkspaceAction::Setup(worktrees_to_setup) => {
+                    return setup_worktrees(&worktrees_to_setup, &worktrees);
+                }
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
         }
     };
 
-    remove_worktrees(&targets, &worktrees, force)
+    remove_worktrees(&targets, &worktrees, force, delete_branch, false)
 }
 
 /// Bring a workspace up to date by fetching origin and rebasing its branch
@@ -320,32 +354,7 @@ pub fn run_update(query: Option<String>, base: Option<String>) -> Result<()> {
             .ok_or(WorkspaceError::GitError(GitError::NotInRepo))?,
     };
 
-    let Some(branch) = target.branch.clone() else {
-        return Err(WorkspaceError::DetachedHead(target.name.clone()).into());
-    };
-
-    if git::worktree::has_tracked_changes(&target.path).map_err(WorkspaceError::GitError)? {
-        return Err(WorkspaceError::Dirty(target.name.clone()).into());
-    }
-
-    fetch_origin();
-
-    let base = match base {
-        Some(base) => base,
-        None => git::worktree::default_remote_branch()
-            .map_err(WorkspaceError::GitError)?
-            .ok_or(WorkspaceError::NoBase)?,
-    };
-
-    eprintln!("Rebasing '{}' onto '{}'...", branch, base);
-    git::worktree::rebase_onto(&target.path, &base)
-        .map_err(|e| WorkspaceError::RebaseFailed(e.to_string()))?;
-
-    eprintln!(
-        "Updated workspace '{}': '{}' is now up to date with '{}'",
-        target.name, branch, base
-    );
-    Ok(())
+    update_worktrees(&[target], base)
 }
 
 /// Fetch origin (when it exists) so remote-tracking refs are current.
@@ -368,18 +377,168 @@ fn fetch_origin() {
 /// the repo-specific setup script when one is configured.
 pub fn run_setup() -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
-    let main_root = main_worktree_root(&worktrees)?;
     let current = git::worktree::current_worktree_root().map_err(WorkspaceError::GitError)?;
 
-    if paths_equal(&main_root, &current) {
-        eprintln!("Already in the main worktree; nothing to copy");
+    let current = worktrees
+        .iter()
+        .find(|w| paths_equal(&w.path, &current))
+        .cloned()
+        .ok_or(WorkspaceError::GitError(GitError::NotInRepo))?;
+
+    setup_worktrees(&[current], &worktrees)
+}
+
+/// Interactive workspace manager (default when no subcommand is given).
+pub fn run_interactive() -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+
+    let Some(action) = pick_workspace(&worktrees)? else {
+        eprintln!("Cancelled");
+        return Ok(());
+    };
+
+    match action {
+        WorkspaceAction::Go(w) => {
+            eprintln!("Switching to workspace '{}'", w.name);
+            print_go_path(&w.path);
+            Ok(())
+        }
+        WorkspaceAction::Remove {
+            worktrees: worktrees_to_remove,
+            delete_branches,
+            confirmed,
+        } => remove_worktrees(
+            &worktrees_to_remove,
+            &worktrees,
+            false,
+            delete_branches,
+            confirmed,
+        ),
+        WorkspaceAction::Update(worktrees_to_update) => {
+            update_worktrees(&worktrees_to_update, None)
+        }
+        WorkspaceAction::Setup(worktrees_to_setup) => {
+            setup_worktrees(&worktrees_to_setup, &worktrees)
+        }
+        WorkspaceAction::Create { name } => create_from_picker(name),
+    }
+}
+
+fn pick_workspace(worktrees: &[Worktree]) -> Result<Option<WorkspaceAction>> {
+    let mut terminal = ui::terminal::setup_terminal_stderr()
+        .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
+    let summaries = git::worktree::summarize_all(worktrees);
+    let result = ui::workspace_picker::run(&mut terminal, worktrees, &summaries);
+    ui::terminal::restore_terminal_stderr(terminal)
+        .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
+    result
+}
+
+fn create_from_picker(name: String) -> Result<()> {
+    let name = if name.is_empty() {
+        eprint!("Workspace name: ");
+        io::stderr().flush().ok();
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
+        input.trim().to_string()
+    } else {
+        name
+    };
+
+    if name.is_empty() {
+        eprintln!("Cancelled");
         return Ok(());
     }
 
+    run_new(name, None, None, false)
+}
+
+fn update_worktrees(worktrees_to_update: &[Worktree], base: Option<String>) -> Result<()> {
+    let mut seen = HashSet::new();
+    let targets: Vec<Worktree> = worktrees_to_update
+        .iter()
+        .filter(|w| seen.insert(w.path.clone()))
+        .cloned()
+        .collect();
+
+    if targets.is_empty() {
+        eprintln!("No workspaces selected");
+        return Ok(());
+    }
+
+    for target in &targets {
+        if target.branch.is_none() {
+            return Err(WorkspaceError::DetachedHead(target.name.clone()).into());
+        }
+
+        if git::worktree::has_tracked_changes(&target.path).map_err(WorkspaceError::GitError)? {
+            return Err(WorkspaceError::Dirty(target.name.clone()).into());
+        }
+    }
+
+    fetch_origin();
+
+    let base = match base {
+        Some(base) => base,
+        None => git::worktree::default_remote_branch()
+            .map_err(WorkspaceError::GitError)?
+            .ok_or(WorkspaceError::NoBase)?,
+    };
+
+    for target in &targets {
+        let Some(branch) = target.branch.as_deref() else {
+            continue;
+        };
+        eprintln!("Rebasing '{}' onto '{}'...", branch, base);
+        git::worktree::rebase_onto(&target.path, &base)
+            .map_err(|e| WorkspaceError::RebaseFailed(e.to_string()))?;
+
+        eprintln!(
+            "Updated workspace '{}': '{}' is now up to date with '{}'",
+            target.name, branch, base
+        );
+    }
+
+    Ok(())
+}
+
+fn setup_worktrees(worktrees_to_setup: &[Worktree], all_worktrees: &[Worktree]) -> Result<()> {
+    let mut seen = HashSet::new();
+    let targets: Vec<Worktree> = worktrees_to_setup
+        .iter()
+        .filter(|w| seen.insert(w.path.clone()))
+        .cloned()
+        .collect();
+
+    if targets.is_empty() {
+        eprintln!("No workspaces selected");
+        return Ok(());
+    }
+
+    let main_root = main_worktree_root(all_worktrees)?;
     let cfg = config::load()?;
-    let report =
-        repo_setup::run_setup_pipeline(&main_root, &current, &cfg.workspace.copy_files, true)?;
-    print_setup_report(&report, "", &cfg.workspace.copy_files);
+
+    for target in &targets {
+        if paths_equal(&main_root, &target.path) {
+            eprintln!(
+                "Skipping main worktree '{}'; nothing to set up",
+                target.name
+            );
+            continue;
+        }
+
+        let report = repo_setup::run_setup_pipeline(
+            &main_root,
+            &target.path,
+            &cfg.workspace.copy_files,
+            true,
+        )?;
+
+        eprintln!("Setup for '{}':", target.name);
+        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
+    }
 
     Ok(())
 }
@@ -421,62 +580,12 @@ fn display_exit_status(status: &ExitStatus) -> String {
         .unwrap_or_else(|| "terminated by signal".to_string())
 }
 
-/// Interactive workspace manager (default when no subcommand is given).
-pub fn run_interactive() -> Result<()> {
-    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
-
-    let Some(action) = pick_workspace(&worktrees)? else {
-        eprintln!("Cancelled");
-        return Ok(());
-    };
-
-    match action {
-        WorkspaceAction::Go(w) => {
-            eprintln!("Switching to workspace '{}'", w.name);
-            print_go_path(&w.path);
-            Ok(())
-        }
-        WorkspaceAction::Remove(worktrees_to_remove) => {
-            remove_worktrees(&worktrees_to_remove, &worktrees, false)
-        }
-        WorkspaceAction::Create { name } => create_from_picker(name),
-    }
-}
-
-fn pick_workspace(worktrees: &[Worktree]) -> Result<Option<WorkspaceAction>> {
-    let mut terminal = ui::terminal::setup_terminal_stderr()
-        .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
-    let result = ui::workspace_picker::run(&mut terminal, worktrees);
-    ui::terminal::restore_terminal_stderr(terminal)
-        .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
-    result
-}
-
-fn create_from_picker(name: String) -> Result<()> {
-    let name = if name.is_empty() {
-        eprint!("Workspace name: ");
-        io::stderr().flush().ok();
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
-        input.trim().to_string()
-    } else {
-        name
-    };
-
-    if name.is_empty() {
-        eprintln!("Cancelled");
-        return Ok(());
-    }
-
-    run_new(name, None, None, false)
-}
-
 fn remove_worktrees(
     worktrees_to_remove: &[Worktree],
     all_worktrees: &[Worktree],
     force: bool,
+    delete_branches: bool,
+    already_confirmed: bool,
 ) -> Result<()> {
     let mut seen = HashSet::new();
     let mut targets: Vec<Worktree> = worktrees_to_remove
@@ -500,11 +609,13 @@ fn remove_worktrees(
 
     let main_root = main_worktree_root(all_worktrees)?;
 
-    let prompt = remove_prompt(&targets);
-    let confirmed = ui::confirm::run_on_stderr(&prompt)?;
-    if !confirmed {
-        eprintln!("Cancelled");
-        return Ok(());
+    if !already_confirmed {
+        let prompt = remove_prompt(&targets, delete_branches);
+        let confirmed = ui::confirm::run_on_stderr(&prompt)?;
+        if !confirmed {
+            eprintln!("Cancelled");
+            return Ok(());
+        }
     }
 
     let removes_current = targets.iter().any(|w| w.is_current);
@@ -532,6 +643,13 @@ fn remove_worktrees(
         }
 
         match &worktree.branch {
+            Some(branch) if delete_branches => {
+                delete_local_branch(&main_root, branch)?;
+                eprintln!(
+                    "Removed workspace '{}' and deleted branch '{}'",
+                    worktree.name, branch
+                );
+            }
             Some(branch) => eprintln!(
                 "Removed workspace '{}' (branch '{}' kept)",
                 worktree.name, branch
@@ -549,11 +667,45 @@ fn remove_worktrees(
     Ok(())
 }
 
-fn remove_prompt(worktrees_to_remove: &[Worktree]) -> String {
+fn delete_local_branch(main_root: &Path, branch: &str) -> Result<()> {
+    match git::worktree::delete_branch(main_root, branch, false) {
+        Ok(()) => Ok(()),
+        Err(GitError::CommandFailed(msg)) if msg.contains("not fully merged") => {
+            let confirmed = ui::confirm::run_on_stderr(&format!(
+                "Branch '{}' is not fully merged. Force delete it?",
+                branch
+            ))?;
+            if confirmed {
+                git::worktree::delete_branch(main_root, branch, true)
+                    .map_err(WorkspaceError::GitError)?;
+            } else {
+                eprintln!("Kept branch '{}'", branch);
+            }
+            Ok(())
+        }
+        Err(e) => Err(WorkspaceError::GitError(e).into()),
+    }
+}
+
+fn remove_prompt(worktrees_to_remove: &[Worktree], delete_branches: bool) -> String {
     if let [worktree] = worktrees_to_remove {
         return if worktree.is_current {
+            if delete_branches {
+                format!(
+                    "Remove current workspace '{}' ({}) and delete its local branch? You will be moved to the main workspace.",
+                    worktree.name,
+                    worktree.path.display()
+                )
+            } else {
+                format!(
+                    "Remove current workspace '{}' ({})? You will be moved to the main workspace.",
+                    worktree.name,
+                    worktree.path.display()
+                )
+            }
+        } else if delete_branches {
             format!(
-                "Remove current workspace '{}' ({})? You will be moved to the main workspace.",
+                "Remove workspace '{}' ({}) and delete its local branch?",
                 worktree.name,
                 worktree.path.display()
             )
@@ -566,7 +718,14 @@ fn remove_prompt(worktrees_to_remove: &[Worktree]) -> String {
         };
     }
 
-    let mut lines = vec![format!("Remove {} workspaces?", worktrees_to_remove.len())];
+    let mut lines = vec![if delete_branches {
+        format!(
+            "Remove {} workspaces and delete their local branches?",
+            worktrees_to_remove.len()
+        )
+    } else {
+        format!("Remove {} workspaces?", worktrees_to_remove.len())
+    }];
     if worktrees_to_remove.iter().any(|w| w.is_current) {
         lines.push(
             "The current workspace is selected; you will be moved to the main workspace."
@@ -809,7 +968,7 @@ mod tests {
         let feature = worktree("feature", Some("feature"));
         let fix = worktree("fix", Some("fix"));
 
-        let prompt = remove_prompt(&[feature, fix]);
+        let prompt = remove_prompt(&[feature, fix], false);
 
         assert!(prompt.contains("Remove 2 workspaces?"));
         assert!(prompt.contains("  - feature (/ws/feature)"));
@@ -822,10 +981,18 @@ mod tests {
         let mut current = worktree("current", Some("current"));
         current.is_current = true;
 
-        let prompt = remove_prompt(&[feature, current]);
+        let prompt = remove_prompt(&[feature, current], false);
 
         assert!(prompt.contains(
             "The current workspace is selected; you will be moved to the main workspace."
         ));
+    }
+
+    #[test]
+    fn test_remove_prompt_mentions_branch_delete() {
+        let feature = worktree("feature", Some("feature"));
+        let prompt = remove_prompt(&[feature], true);
+
+        assert!(prompt.contains("delete its local branch"));
     }
 }

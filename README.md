@@ -189,10 +189,11 @@ gx workspace remove [query] # Remove a workspace (asks for confirmation).
                             # Removing the workspace you are in moves you
                             # to the main workspace first.
 gx workspace remove <name> --force # Remove even with uncommitted changes
+gx workspace remove <name> --delete-branch # Also delete the local branch
 gx workspace setup         # Re-run setup: copy files, then run setup script
 ```
 
-**Interactive TUI** (`gx workspace`): fuzzy search across workspace names and branches, with `enter` to switch, `ctrl+n` to create a workspace named after the current query, and `ctrl+d` to remove the selection.
+**Interactive TUI** (`gx workspace`): fuzzy search across workspace names and branches, with `enter` to switch and `ctrl+n` to create a workspace named after the current query. The workspace list supports multi-select: `space` toggles a workspace, `ctrl+a` toggles all visible workspaces, and `ctrl+u` clears selections. Use `ctrl+d` to remove selected workspaces, or `ctrl+b` to remove them and delete their local branches after an inline confirmation. Bulk actions include `ctrl+r` to update/rebase selected workspaces and `ctrl+t` to re-copy setup files. Press `?` for the full help screen.
 
 **Changing directories:** a child process can't change your shell's directory, so `cd`-on-switch is handled by the shell wrapper emitted by `gx setup`. With `eval "$(gx setup)"` in your shell config, `gx workspace go`, `gx workspace new`, and the TUI will land you directly in the workspace. Without it, the workspace path is printed so you can `cd "$(gx workspace go <query>)"` yourself.
 

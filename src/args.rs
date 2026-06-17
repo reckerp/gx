@@ -208,6 +208,10 @@ pub enum WorkspaceCommands {
         /// Remove even if the workspace has uncommitted changes
         #[arg(short, long)]
         force: bool,
+
+        /// Delete the associated local branch after removing the workspace
+        #[arg(long)]
+        delete_branch: bool,
     },
 
     /// Copy setup files (e.g. .env) from the main worktree into this workspace
@@ -264,9 +268,11 @@ impl Commands {
                 Some(WorkspaceCommands::Update { query, base }) => {
                     commands::workspace::run_update(query, base)
                 }
-                Some(WorkspaceCommands::Remove { query, force }) => {
-                    commands::workspace::run_remove(query, force)
-                }
+                Some(WorkspaceCommands::Remove {
+                    query,
+                    force,
+                    delete_branch,
+                }) => commands::workspace::run_remove(query, force, delete_branch),
                 Some(WorkspaceCommands::Setup) => commands::workspace::run_setup(),
             },
             Commands::Setup => commands::setup::run(),

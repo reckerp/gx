@@ -34,10 +34,17 @@ fn render_search_bar(query: &str) -> Paragraph<'_> {
     )
 }
 
-fn render_branch_list(branches: &[String], selected: usize) -> List<'_> {
+fn render_branch_list(
+    branches: &[String],
+    selected: usize,
+    scroll_offset: usize,
+    visible_height: usize,
+) -> List<'_> {
     let items: Vec<ListItem> = branches
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
         .map(|(i, branch)| {
             let style = if i == selected {
                 Style::default()
@@ -50,10 +57,38 @@ fn render_branch_list(branches: &[String], selected: usize) -> List<'_> {
         })
         .collect();
 
+    let title = format!(
+        " Branches ({}) ",
+        visible_range(branches.len(), scroll_offset, visible_height)
+    );
     List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Branches "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(">> ")
+}
+
+fn adjust_scroll(selected: usize, scroll_offset: usize, visible_height: usize) -> usize {
+    if visible_height == 0 {
+        return scroll_offset;
+    }
+
+    if selected >= scroll_offset + visible_height {
+        selected.saturating_sub(visible_height - 1)
+    } else if selected < scroll_offset {
+        selected
+    } else {
+        scroll_offset
+    }
+}
+
+fn visible_range(total: usize, scroll_offset: usize, visible_height: usize) -> String {
+    if total == 0 || visible_height == 0 {
+        return "0 shown".to_string();
+    }
+
+    let start = scroll_offset.min(total - 1) + 1;
+    let end = (scroll_offset + visible_height).min(total);
+    format!("{}-{} of {}", start, end, total)
 }
 
 fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'a> {
@@ -119,6 +154,7 @@ fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'
 pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Option<String>> {
     let mut query = String::new();
     let mut selected_index = 0;
+    let mut scroll_offset = 0;
     let mut last_selected: Option<String> = None;
     let mut branch_info: Option<BranchInfo> = None;
     let mut info_loading = false;
@@ -177,9 +213,12 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
                     .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                     .split(main_chunks[1]);
 
+                let visible_height = middle_chunks[0].height.saturating_sub(2) as usize;
+                scroll_offset = adjust_scroll(selected_index, scroll_offset, visible_height);
+
                 f.render_widget(render_search_bar(&query), main_chunks[0]);
                 f.render_widget(
-                    render_branch_list(&filtered, selected_index),
+                    render_branch_list(&filtered, selected_index, scroll_offset, visible_height),
                     middle_chunks[0],
                 );
                 f.render_widget(
@@ -214,13 +253,27 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
                         selected_index += 1;
                     }
                 }
+                (KeyCode::PageUp, _) => {
+                    selected_index = selected_index.saturating_sub(10);
+                }
+                (KeyCode::PageDown, _) => {
+                    selected_index = (selected_index + 10).min(filtered.len().saturating_sub(1));
+                }
+                (KeyCode::Home, _) => {
+                    selected_index = 0;
+                }
+                (KeyCode::End, _) => {
+                    selected_index = filtered.len().saturating_sub(1);
+                }
                 (KeyCode::Backspace, _) => {
                     query.pop();
                     selected_index = 0;
+                    scroll_offset = 0;
                 }
                 (KeyCode::Char(c), _) => {
                     query.push(c);
                     selected_index = 0;
+                    scroll_offset = 0;
                 }
                 _ => {}
             }
