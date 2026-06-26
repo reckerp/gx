@@ -4,6 +4,8 @@ use crate::git::pull_request::{PullRequestLookup, PullRequestStatus};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct Worktree {
@@ -248,21 +250,46 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
     Ok(())
 }
 
-/// Compute the local (network-free) status for every worktree. Pull-request
-/// status is left as `Loading`; resolve it separately via
-/// [`crate::git::pull_request::spawn_lookup`] and [`apply_pull_requests`] so the
-/// caller never blocks on the network.
+/// Compute the local (network-free) status for every worktree, in parallel.
+/// Each summary shells out to git (status + ahead/behind) against an independent
+/// working tree, so the work is I/O-bound and embarrassingly parallel; doing it
+/// serially makes opening the workspace picker scale linearly with the number of
+/// worktrees. Pull-request status is left as `Loading`; resolve it separately
+/// via [`crate::git::pull_request::spawn_lookup`] and [`apply_pull_requests`] so
+/// the caller never blocks on the network.
 pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
-    worktrees
-        .iter()
-        .map(|worktree| {
-            let summary = summarize(worktree).unwrap_or_else(|_| WorktreeSummary {
-                status_error: true,
-                ..Default::default()
+    if worktrees.is_empty() {
+        return HashMap::new();
+    }
+
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<(PathBuf, WorktreeSummary)>> =
+        Mutex::new(Vec::with_capacity(worktrees.len()));
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(worktrees.len());
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(worktree) = worktrees.get(i) else {
+                        break;
+                    };
+                    let summary = summarize(worktree).unwrap_or_else(|_| WorktreeSummary {
+                        status_error: true,
+                        ..Default::default()
+                    });
+                    results.lock().unwrap().push((worktree.path.clone(), summary));
+                }
             });
-            (worktree.path.clone(), summary)
-        })
-        .collect()
+        }
+    });
+
+    results.into_inner().unwrap().into_iter().collect()
 }
 
 /// Merge a completed pull-request lookup into existing summaries. On success
@@ -344,21 +371,9 @@ fn parse_status_counts(output: &str) -> (usize, usize) {
 }
 
 fn ahead_behind(path: &Path) -> Result<(Option<usize>, Option<usize>), GitError> {
-    git_exec::exec(
-        vec![
-            "-C".to_string(),
-            path.display().to_string(),
-            "rev-parse".to_string(),
-            "--abbrev-ref".to_string(),
-            "--symbolic-full-name".to_string(),
-            "@{upstream}".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
-    )?;
-
+    // rev-list itself fails when the branch has no upstream, and the caller
+    // treats any error here as "no ahead/behind info", so a separate
+    // rev-parse @{upstream} existence check would just be a wasted git spawn.
     let output = git_exec::exec(
         vec![
             "-C".to_string(),
