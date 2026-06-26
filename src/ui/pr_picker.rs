@@ -981,14 +981,15 @@ mod tests {
 
     #[test]
     fn test_build_display_orders_categories() {
-        // Authored draft -> Drafts; review-requested -> NeedsYourReview (first).
+        // Authored draft -> Drafts; review-requested -> NeedsYourReview (last).
         let prs = vec![
-            pr(1, "o", "r", Relation::Authored, true),
             pr(2, "o", "r", Relation::ReviewRequested, false),
+            pr(1, "o", "r", Relation::Authored, true),
         ];
         let display = build_display(&prs, "");
-        // First selectable PR should be the NeedsYourReview one (#2).
-        assert_eq!(display.prs[0].number, 2);
+        // Needs-your-review sorts to the bottom; the draft precedes it.
+        assert_eq!(display.prs.first().unwrap().number, 1);
+        assert_eq!(display.prs.last().unwrap().number, 2);
     }
 
     #[test]

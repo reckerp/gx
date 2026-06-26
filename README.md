@@ -40,7 +40,7 @@ cargo run -- <arguments>
 | `stash`    | `st`           | Stash changes                       |
 | `log`      | `l`            | View commit history                 |
 | `workspace`| `ws`           | Manage workspaces (git worktrees)   |
-| `pr`       | `prs`          | Dashboard of your open pull requests|
+| `pr`       | `prs`, `pullrequest`, `pullrequests` | Dashboard of your open pull requests|
 | `onboarding`| `onboard`    | Configure repo-specific setup       |
 | `setup`    | -              | Generate shell aliases from config  |
 
@@ -218,7 +218,7 @@ installed and authenticated (`gh auth login`).
 
 ```bash
 gx pr                      # Interactive PR dashboard (TUI)
-gx prs                     # Same
+gx prs                     # Same (aliases: pullrequest, pullrequests)
 gx pr list                 # Non-interactive grouped listing (for non-TTY / piping)
 ```
 

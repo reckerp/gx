@@ -367,15 +367,15 @@ pub enum Category {
 }
 
 impl Category {
-    /// Display order for both the TUI and `gx pr list`. Waiting-for-review (your
-    /// PRs blocked on someone else) leads, since that's the user's own queue.
+    /// Display order for both the TUI and `gx pr list`. Your own PRs lead
+    /// (waiting-for-review first); incoming "needs your review" sits last.
     pub const ALL: [Category; 6] = [
         Category::WaitingForReview,
-        Category::NeedsYourReview,
         Category::ReadyToMerge,
         Category::ChangesRequested,
         Category::Drafts,
         Category::Unknown,
+        Category::NeedsYourReview,
     ];
 
     pub fn title(self) -> &'static str {

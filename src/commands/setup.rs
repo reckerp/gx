@@ -8,7 +8,7 @@ use miette::Result;
 const WORKSPACE_SHELL_WRAPPER: &str = r#"# Workspace cd integration
 gx() {
     case "$1" in
-        workspace|ws|pr|prs)
+        workspace|ws|pr|prs|pullrequest|pullrequests)
             local __gx_out
             __gx_out="$(command gx "$@")" || return $?
             if [ -n "$__gx_out" ] && [ -d "$__gx_out" ]; then

@@ -91,7 +91,7 @@ pub enum Commands {
     },
 
     /// Dashboard of your open pull requests
-    #[command(alias = "prs")]
+    #[command(aliases = ["prs", "pullrequest", "pullrequests"])]
     Pr {
         #[command(subcommand)]
         action: Option<PrCommands>,
