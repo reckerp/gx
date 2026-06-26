@@ -1,6 +1,6 @@
 use super::{GitError, get_repo};
 use crate::git::git_exec::{self, ExecOptions};
-use crate::git::pull_request::PullRequestSummary;
+use crate::git::pull_request::{PullRequestLookup, PullRequestStatus};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,8 +28,7 @@ pub struct WorktreeSummary {
     pub untracked_changes: usize,
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
-    pub pull_request: Option<PullRequestSummary>,
-    pub pull_request_error: bool,
+    pub pull_request: PullRequestStatus,
     pub status_error: bool,
 }
 
@@ -249,8 +248,12 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
     Ok(())
 }
 
+/// Compute the local (network-free) status for every worktree. Pull-request
+/// status is left as `Loading`; resolve it separately via
+/// [`crate::git::pull_request::spawn_lookup`] and [`apply_pull_requests`] so the
+/// caller never blocks on the network.
 pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
-    let mut summaries: HashMap<PathBuf, WorktreeSummary> = worktrees
+    worktrees
         .iter()
         .map(|worktree| {
             let summary = summarize(worktree).unwrap_or_else(|_| WorktreeSummary {
@@ -259,30 +262,39 @@ pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary
             });
             (worktree.path.clone(), summary)
         })
-        .collect();
+        .collect()
+}
 
-    match crate::git::pull_request::list_for_worktrees(worktrees) {
-        Ok(pull_requests) => {
+/// Merge a completed pull-request lookup into existing summaries. On success
+/// each branch resolves to `Found` (when a PR matched) or `None`; on failure
+/// every summary is marked `Error`.
+pub fn apply_pull_requests(
+    summaries: &mut HashMap<PathBuf, WorktreeSummary>,
+    worktrees: &[Worktree],
+    lookup: PullRequestLookup,
+) {
+    match lookup {
+        Ok(mut pull_requests) => {
             for worktree in worktrees {
-                let Some(branch) = worktree.branch.as_deref() else {
+                let Some(summary) = summaries.get_mut(&worktree.path) else {
                     continue;
                 };
-                let Some(pull_request) = pull_requests.get(branch).cloned() else {
-                    continue;
+                summary.pull_request = match worktree
+                    .branch
+                    .as_deref()
+                    .and_then(|branch| pull_requests.remove(branch))
+                {
+                    Some(pull_request) => PullRequestStatus::Found(pull_request),
+                    None => PullRequestStatus::None,
                 };
-                if let Some(summary) = summaries.get_mut(&worktree.path) {
-                    summary.pull_request = Some(pull_request);
-                }
             }
         }
         Err(_) => {
             for summary in summaries.values_mut() {
-                summary.pull_request_error = true;
+                summary.pull_request = PullRequestStatus::Error;
             }
         }
     }
-
-    summaries
 }
 
 pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
@@ -310,8 +322,11 @@ pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
         untracked_changes,
         ahead,
         behind,
-        pull_request: None,
-        pull_request_error: false,
+        pull_request: if worktree.branch.is_some() {
+            PullRequestStatus::Loading
+        } else {
+            PullRequestStatus::None
+        },
         status_error: false,
     })
 }
@@ -547,6 +562,60 @@ mod tests {
             is_bare: false,
             is_locked: false,
         }
+    }
+
+    fn pr_summary(number: usize) -> crate::git::pull_request::PullRequestSummary {
+        crate::git::pull_request::PullRequestSummary {
+            number,
+            state: crate::git::pull_request::PullRequestState::Open,
+            url: format!("https://example.com/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_pull_requests_resolves_matched_and_unmatched_branches() {
+        let feature = worktree("feature", Some("feature"));
+        let solo = worktree("solo", Some("no-pr"));
+        let detached = worktree("detached", None);
+        let worktrees = [feature.clone(), solo.clone(), detached.clone()];
+
+        let mut summaries: HashMap<PathBuf, WorktreeSummary> = worktrees
+            .iter()
+            .map(|w| (w.path.clone(), WorktreeSummary::default()))
+            .collect();
+
+        let lookup = Ok(HashMap::from([("feature".to_string(), pr_summary(7))]));
+        apply_pull_requests(&mut summaries, &worktrees, lookup);
+
+        assert_eq!(
+            summaries[&feature.path].pull_request,
+            PullRequestStatus::Found(pr_summary(7))
+        );
+        assert_eq!(summaries[&solo.path].pull_request, PullRequestStatus::None);
+        // A worktree with no branch can never match a PR.
+        assert_eq!(
+            summaries[&detached.path].pull_request,
+            PullRequestStatus::None
+        );
+    }
+
+    #[test]
+    fn test_apply_pull_requests_marks_all_errored_on_failure() {
+        let feature = worktree("feature", Some("feature"));
+        let worktrees = [feature.clone()];
+        let mut summaries: HashMap<PathBuf, WorktreeSummary> =
+            HashMap::from([(feature.path.clone(), WorktreeSummary::default())]);
+
+        apply_pull_requests(
+            &mut summaries,
+            &worktrees,
+            Err(crate::git::pull_request::PullRequestLookupError::CommandFailed),
+        );
+
+        assert_eq!(
+            summaries[&feature.path].pull_request,
+            PullRequestStatus::Error
+        );
     }
 
     #[test]

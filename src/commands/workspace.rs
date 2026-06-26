@@ -427,8 +427,12 @@ pub fn run_interactive() -> Result<()> {
 fn pick_workspace(worktrees: &[Worktree]) -> Result<Option<WorkspaceAction>> {
     let mut terminal = ui::terminal::setup_terminal_stderr()
         .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
+    // Kick off the network PR lookup first so it overlaps with the local
+    // (network-free) summaries; the TUI renders immediately and PR badges
+    // stream in when the lookup resolves.
+    let pull_requests = git::pull_request::spawn_lookup(worktrees);
     let summaries = git::worktree::summarize_all(worktrees);
-    let result = ui::workspace_picker::run(&mut terminal, worktrees, &summaries);
+    let result = ui::workspace_picker::run(&mut terminal, worktrees, summaries, pull_requests);
     ui::terminal::restore_terminal_stderr(terminal)
         .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
     result

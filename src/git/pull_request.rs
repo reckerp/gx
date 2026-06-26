@@ -1,6 +1,8 @@
 use super::worktree::Worktree;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullRequestState {
@@ -28,10 +30,42 @@ pub struct PullRequestSummary {
     pub url: String,
 }
 
+/// PR status for a single worktree as it moves through the background lookup.
+/// Starts as `Loading` so the TUI can render immediately, then resolves once
+/// the network request returns (or fails).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PullRequestStatus {
+    /// The background lookup is still in flight.
+    #[default]
+    Loading,
+    /// Lookup finished and matched a pull request for the branch.
+    Found(PullRequestSummary),
+    /// Lookup finished; no pull request matched the branch.
+    None,
+    /// Lookup failed (gh missing, offline, or a command error).
+    Error,
+}
+
 #[derive(Debug)]
 pub enum PullRequestLookupError {
     Io,
     CommandFailed,
+}
+
+/// Result of a (possibly backgrounded) PR lookup, keyed by branch name.
+pub type PullRequestLookup = Result<HashMap<String, PullRequestSummary>, PullRequestLookupError>;
+
+/// Run [`list_for_worktrees`] on a background thread and stream the result back
+/// over a channel, so the caller (the workspace TUI) never blocks on the
+/// network. The lookup is sent exactly once; if the receiver is dropped first
+/// (the user closed the TUI), the send is silently discarded.
+pub fn spawn_lookup(worktrees: &[Worktree]) -> Receiver<PullRequestLookup> {
+    let (tx, rx) = mpsc::channel();
+    let worktrees = worktrees.to_vec();
+    thread::spawn(move || {
+        let _ = tx.send(list_for_worktrees(&worktrees));
+    });
+    rx
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
