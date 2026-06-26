@@ -8,6 +8,7 @@
 use super::github;
 use miette::Diagnostic;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -251,6 +252,43 @@ pub fn search(scope: &Scope, relation: Relation) -> Result<Vec<DashboardPr>, PrE
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_search(&stdout, relation)
+}
+
+/// Result of a combined (authored + review-requested) search.
+pub type SearchResult = Result<Vec<DashboardPr>, PrError>;
+
+/// Merge authored + review-requested results, dropping duplicates by [`PrId`].
+/// A PR appearing in both relations keeps the `ReviewRequested` relation so it
+/// short-circuits to `NeedsYourReview` (KTD3).
+pub fn dedup_prs(
+    authored: Vec<DashboardPr>,
+    review_requested: Vec<DashboardPr>,
+) -> Vec<DashboardPr> {
+    let mut seen: HashSet<PrId> = HashSet::new();
+    let mut out = Vec::new();
+    for pr in review_requested.into_iter().chain(authored.into_iter()) {
+        if seen.insert(pr.id()) {
+            out.push(pr);
+        }
+    }
+    out
+}
+
+/// Run both relation searches for `scope` on a background thread, returning the
+/// combined, deduped list over a channel (sent once). Swapping the returned
+/// receiver on a scope change is what makes stale results harmless — the old
+/// receiver is dropped and its send discarded.
+pub fn spawn_search(scope: Scope) -> Receiver<SearchResult> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let combined = (|| {
+            let authored = search(&scope, Relation::Authored)?;
+            let review_requested = search(&scope, Relation::ReviewRequested)?;
+            Ok(dedup_prs(authored, review_requested))
+        })();
+        let _ = tx.send(combined);
+    });
+    rx
 }
 
 // `gh search prs --json` shapes (only the fields we consume).
@@ -695,6 +733,30 @@ mod tests {
             "a/b"
         );
         assert_eq!(Scope::Global.label(), "all repos");
+    }
+
+    #[test]
+    fn test_dedup_prs_prefers_review_requested() {
+        let make = |number: u64, relation: Relation| DashboardPr {
+            number,
+            title: "t".to_string(),
+            url: "u".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            is_draft: false,
+            updated_at: "2026-06-26T00:00:00Z".to_string(),
+            author: "me".to_string(),
+            relation,
+            status: EnrichStatus::Loading,
+        };
+        // #1 is in both relations; #2 authored only; #3 review-requested only.
+        let authored = vec![make(1, Relation::Authored), make(2, Relation::Authored)];
+        let review = vec![make(1, Relation::ReviewRequested), make(3, Relation::ReviewRequested)];
+
+        let merged = dedup_prs(authored, review);
+        assert_eq!(merged.len(), 3);
+        let one = merged.iter().find(|p| p.number == 1).unwrap();
+        assert_eq!(one.relation, Relation::ReviewRequested);
     }
 
     // ----- U3: enrichment + categorization -----
