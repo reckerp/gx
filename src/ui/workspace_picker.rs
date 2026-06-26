@@ -348,6 +348,26 @@ fn action_targets(
         .collect()
 }
 
+/// Collect the unique PR URLs for the given target worktrees, skipping any that
+/// have no resolved PR (still loading, none found, or lookup failed). Order
+/// follows `targets` so the browser tabs open in a predictable order.
+fn pr_urls_for_targets(
+    targets: &[Worktree],
+    summaries: &HashMap<PathBuf, WorktreeSummary>,
+) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for target in targets {
+        if let Some(summary) = summaries.get(&target.path)
+            && let PullRequestStatus::Found(pull_request) = &summary.pull_request
+            && !pull_request.url.is_empty()
+            && !urls.contains(&pull_request.url)
+        {
+            urls.push(pull_request.url.clone());
+        }
+    }
+    urls
+}
+
 fn toggle_selection(worktree: Option<&Worktree>, selected_paths: &mut HashSet<PathBuf>) {
     let Some(worktree) = worktree else {
         return;
@@ -431,6 +451,10 @@ fn render_help_modal(area: Rect) -> Paragraph<'static> {
         Line::from(vec![
             Span::styled("Bulk actions", Style::default().bold()),
             Span::raw(": ctrl+r updates selected, ctrl+t re-copies setup files"),
+        ]),
+        Line::from(vec![
+            Span::styled("Pull requests", Style::default().bold()),
+            Span::raw(": ctrl+o opens the selected (or highlighted) PR(s) in your browser"),
         ]),
         Line::from(""),
         Line::from("Selections persist while filtering, so you can search/select several groups."),
@@ -577,6 +601,7 @@ pub fn run(
                                 ("^a", "All shown"),
                                 ("^u", "Clear"),
                                 ("Enter", "Go"),
+                                ("^o", "Open PR"),
                                 ("^r", "Update"),
                                 ("^t", "Setup"),
                                 ("^d", "Remove"),
@@ -665,6 +690,22 @@ pub fn run(
                         );
                         if !targets.is_empty() {
                             return Ok(Some(WorkspaceAction::Setup(targets)));
+                        }
+                    }
+                    (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+                        // Open the selected workspaces' PRs (or the highlighted
+                        // one when nothing is selected) in the browser, staying
+                        // in the picker. Best-effort: a missing opener or a
+                        // workspace without a PR is silently skipped.
+                        let targets = action_targets(
+                            worktrees,
+                            &filtered,
+                            selected_index,
+                            &selected_paths,
+                            true,
+                        );
+                        for url in pr_urls_for_targets(&targets, &summaries) {
+                            let _ = crate::browser::open(&url);
                         }
                     }
                     (KeyCode::Char(' '), _) => {
@@ -846,6 +887,59 @@ mod tests {
         );
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].name, "repo");
+    }
+
+    fn summary_with_pr_url(number: usize, url: &str) -> WorktreeSummary {
+        WorktreeSummary {
+            pull_request: PullRequestStatus::Found(PullRequestSummary {
+                number,
+                state: PullRequestState::Open,
+                url: url.to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_pr_urls_for_targets_collects_in_order_and_skips_others() {
+        let one = worktree("one", false);
+        let two = worktree("two", false);
+        let pending = worktree("pending", false); // PR still loading
+        let no_pr = worktree("no-pr", false); // no summary at all
+
+        let mut summaries = HashMap::new();
+        summaries.insert(one.path.clone(), summary_with_pr_url(1, "https://x/pull/1"));
+        summaries.insert(two.path.clone(), summary_with_pr_url(2, "https://x/pull/2"));
+        summaries.insert(pending.path.clone(), WorktreeSummary::default());
+
+        let urls = pr_urls_for_targets(&[one, two, pending, no_pr], &summaries);
+
+        assert_eq!(urls, vec!["https://x/pull/1", "https://x/pull/2"]);
+    }
+
+    #[test]
+    fn test_pr_urls_for_targets_dedupes_shared_urls() {
+        let a = worktree("a", false);
+        let b = worktree("b", false);
+        let mut summaries = HashMap::new();
+        summaries.insert(a.path.clone(), summary_with_pr(PullRequestState::Open));
+        summaries.insert(b.path.clone(), summary_with_pr(PullRequestState::Draft));
+
+        let urls = pr_urls_for_targets(&[a, b], &summaries);
+
+        assert_eq!(
+            urls,
+            vec!["https://github.com/acme/repo/pull/42".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_pr_urls_for_targets_is_empty_without_resolved_prs() {
+        let pending = worktree("pending", false);
+        let mut summaries = HashMap::new();
+        summaries.insert(pending.path.clone(), WorktreeSummary::default());
+
+        assert!(pr_urls_for_targets(&[pending], &summaries).is_empty());
     }
 
     #[test]
