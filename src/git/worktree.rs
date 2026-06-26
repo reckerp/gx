@@ -283,7 +283,10 @@ pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary
                         status_error: true,
                         ..Default::default()
                     });
-                    results.lock().unwrap().push((worktree.path.clone(), summary));
+                    results
+                        .lock()
+                        .unwrap()
+                        .push((worktree.path.clone(), summary));
                 }
             });
         }
