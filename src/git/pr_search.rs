@@ -9,6 +9,9 @@ use super::github;
 use miette::Diagnostic;
 use serde::Deserialize;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use thiserror::Error;
 
 /// Which repositories the dashboard searches.
@@ -308,6 +311,300 @@ fn parse_search(json: &str, relation: Relation) -> Result<Vec<DashboardPr>, PrEr
         .collect())
 }
 
+// ===== Enrichment + categorization (U3) =====
+
+/// Review/merge bucket a PR falls into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    /// Someone asked you to review (the `ReviewRequested` relation).
+    NeedsYourReview,
+    WaitingForReview,
+    ReadyToMerge,
+    ChangesRequested,
+    Drafts,
+    /// Not yet enriched, or enrichment failed.
+    Unknown,
+}
+
+/// Pure categorization per the plan's KTD3 decision tree. Review-requested PRs
+/// short-circuit to `NeedsYourReview`; drafts are known from search alone, so a
+/// draft is bucketed before enrichment resolves.
+pub fn categorize(pr: &DashboardPr) -> Category {
+    if pr.relation == Relation::ReviewRequested {
+        return Category::NeedsYourReview;
+    }
+    if pr.is_draft {
+        return Category::Drafts;
+    }
+    match &pr.status {
+        EnrichStatus::Loading | EnrichStatus::Failed => Category::Unknown,
+        EnrichStatus::Ready(enriched) => categorize_enriched(enriched),
+    }
+}
+
+fn categorize_enriched(e: &EnrichedStatus) -> Category {
+    let has_changes_requested = e.review_decision == Some(ReviewDecision::ChangesRequested)
+        || (e.review_decision.is_none()
+            && e.latest_reviews
+                .iter()
+                .any(|r| r.state == ReviewState::ChangesRequested));
+    if has_changes_requested {
+        return Category::ChangesRequested;
+    }
+
+    let approved = e.review_decision == Some(ReviewDecision::Approved)
+        || (e.review_decision.is_none()
+            && e.latest_reviews
+                .iter()
+                .any(|r| r.state == ReviewState::Approved));
+    if approved {
+        return Category::ReadyToMerge;
+    }
+
+    Category::WaitingForReview
+}
+
+/// Short flag describing why a ready-to-merge PR can't merge yet, or `None` when
+/// the merge state is clean or unknown.
+pub fn merge_blocker_label(state: MergeState) -> Option<&'static str> {
+    match state {
+        MergeState::Clean | MergeState::Unknown => None,
+        MergeState::Behind => Some("out of date"),
+        MergeState::Dirty => Some("conflicts"),
+        MergeState::Unstable => Some("failing/pending checks"),
+        MergeState::Blocked => Some("blocked"),
+    }
+}
+
+const ENRICH_WORKERS: usize = 8;
+
+/// Enrich each PR via `gh pr view` on a detached coordinator thread that fans
+/// work to a bounded worker pool, streaming `(PrId, result)` over a channel as
+/// each completes. Modeled on [`crate::git::pull_request::spawn_lookup`] so the
+/// caller (the TUI) never blocks — the `thread::scope` join happens on the
+/// detached coordinator, not in this function.
+pub fn spawn_enrichment(
+    prs: &[DashboardPr],
+) -> Receiver<(PrId, Result<EnrichedStatus, PrError>)> {
+    let (tx, rx) = mpsc::channel();
+    let ids: Vec<PrId> = prs.iter().map(DashboardPr::id).collect();
+
+    thread::spawn(move || {
+        if ids.is_empty() {
+            return;
+        }
+        let next = AtomicUsize::new(0);
+        let worker_count = ENRICH_WORKERS.min(ids.len());
+
+        thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let tx = tx.clone();
+                let next = &next;
+                let ids = &ids;
+                scope.spawn(move || {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(id) = ids.get(i) else {
+                            break;
+                        };
+                        let result = enrich_one(&id.owner, &id.repo, id.number);
+                        // Receiver dropped (TUI closed) -> stop quietly.
+                        if tx.send((id.clone(), result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+    });
+
+    rx
+}
+
+/// Fetch one PR's enrichment via `gh pr view`. `headRefName`/`isCrossRepository`
+/// ride along here because `gh search prs` cannot return them (KTD1).
+pub fn enrich_one(owner: &str, repo: &str, number: u64) -> Result<EnrichedStatus, PrError> {
+    let slug = format!("{owner}/{repo}");
+
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &slug,
+            "--json",
+            "reviewDecision,mergeStateStatus,statusCheckRollup,reviewRequests,latestReviews,headRefName,isCrossRepository",
+        ])
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => PrError::GhNotFound,
+            _ => PrError::GhFailed(e.to_string()),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(PrError::GhFailed(if stderr.is_empty() {
+            format!("gh pr view {slug}#{number} failed")
+        } else {
+            stderr
+        }));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_pr_view(&stdout)
+}
+
+#[derive(Deserialize)]
+struct RawPrView {
+    #[serde(rename = "reviewDecision", default)]
+    review_decision: String,
+    #[serde(rename = "mergeStateStatus", default)]
+    merge_state_status: String,
+    #[serde(rename = "statusCheckRollup", default)]
+    status_check_rollup: Vec<RawCheck>,
+    #[serde(rename = "reviewRequests", default)]
+    review_requests: Vec<RawReviewRequest>,
+    #[serde(rename = "latestReviews", default)]
+    latest_reviews: Vec<RawLatestReview>,
+    #[serde(rename = "headRefName", default)]
+    head_ref_name: String,
+    #[serde(rename = "isCrossRepository", default)]
+    is_cross_repository: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCheck {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    conclusion: String,
+    #[serde(default)]
+    state: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawReviewRequest {
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawLatestReview {
+    #[serde(default)]
+    author: RawAuthor,
+    #[serde(default)]
+    state: String,
+}
+
+fn parse_pr_view(json: &str) -> Result<EnrichedStatus, PrError> {
+    let raw: RawPrView =
+        serde_json::from_str(json.trim()).map_err(|e| PrError::ParseFailed(e.to_string()))?;
+
+    Ok(EnrichedStatus {
+        review_decision: parse_review_decision(&raw.review_decision),
+        merge_state: parse_merge_state(&raw.merge_state_status),
+        checks: summarize_checks(&raw.status_check_rollup),
+        review_requests: raw.review_requests.iter().map(parse_reviewer_ref).collect(),
+        latest_reviews: raw
+            .latest_reviews
+            .iter()
+            .map(|r| LatestReview {
+                author: r.author.login.clone(),
+                state: parse_review_state(&r.state),
+            })
+            .collect(),
+        head_branch: raw.head_ref_name,
+        is_cross_repository: raw.is_cross_repository,
+    })
+}
+
+fn parse_review_decision(s: &str) -> Option<ReviewDecision> {
+    match s {
+        "APPROVED" => Some(ReviewDecision::Approved),
+        "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
+        "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
+        _ => None,
+    }
+}
+
+fn parse_merge_state(s: &str) -> MergeState {
+    match s {
+        "CLEAN" => MergeState::Clean,
+        "BLOCKED" => MergeState::Blocked,
+        "BEHIND" => MergeState::Behind,
+        "DIRTY" => MergeState::Dirty,
+        "UNSTABLE" => MergeState::Unstable,
+        _ => MergeState::Unknown,
+    }
+}
+
+fn parse_review_state(s: &str) -> ReviewState {
+    match s {
+        "APPROVED" => ReviewState::Approved,
+        "CHANGES_REQUESTED" => ReviewState::ChangesRequested,
+        "COMMENTED" => ReviewState::Commented,
+        "DISMISSED" => ReviewState::Dismissed,
+        _ => ReviewState::Pending,
+    }
+}
+
+fn parse_reviewer_ref(r: &RawReviewRequest) -> ReviewerRef {
+    if let Some(login) = &r.login {
+        ReviewerRef::User(login.clone())
+    } else if let Some(slug) = &r.slug {
+        ReviewerRef::Team(slug.clone())
+    } else if let Some(name) = &r.name {
+        ReviewerRef::Team(name.clone())
+    } else {
+        ReviewerRef::User(String::new())
+    }
+}
+
+enum CheckOutcome {
+    Passing,
+    Failing,
+    Pending,
+}
+
+fn classify_check(c: &RawCheck) -> CheckOutcome {
+    // StatusContext entries carry `state`; CheckRun entries carry status+conclusion.
+    if !c.state.is_empty() {
+        return match c.state.as_str() {
+            "SUCCESS" => CheckOutcome::Passing,
+            "FAILURE" | "ERROR" => CheckOutcome::Failing,
+            _ => CheckOutcome::Pending,
+        };
+    }
+    if c.status != "COMPLETED" {
+        return CheckOutcome::Pending;
+    }
+    match c.conclusion.as_str() {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => CheckOutcome::Passing,
+        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            CheckOutcome::Failing
+        }
+        _ => CheckOutcome::Pending,
+    }
+}
+
+fn summarize_checks(checks: &[RawCheck]) -> ChecksSummary {
+    let mut summary = ChecksSummary::default();
+    for check in checks {
+        match classify_check(check) {
+            CheckOutcome::Passing => summary.passing += 1,
+            CheckOutcome::Failing => summary.failing += 1,
+            CheckOutcome::Pending => summary.pending += 1,
+        }
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +695,212 @@ mod tests {
             "a/b"
         );
         assert_eq!(Scope::Global.label(), "all repos");
+    }
+
+    // ----- U3: enrichment + categorization -----
+
+    fn pr(relation: Relation, is_draft: bool, status: EnrichStatus) -> DashboardPr {
+        DashboardPr {
+            number: 1,
+            title: "t".to_string(),
+            url: "u".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            is_draft,
+            updated_at: "2026-06-26T00:00:00Z".to_string(),
+            author: "me".to_string(),
+            relation,
+            status,
+        }
+    }
+
+    fn enriched(decision: Option<ReviewDecision>, reviews: Vec<ReviewState>) -> EnrichStatus {
+        EnrichStatus::Ready(EnrichedStatus {
+            review_decision: decision,
+            merge_state: MergeState::Clean,
+            checks: ChecksSummary::default(),
+            review_requests: vec![],
+            latest_reviews: reviews
+                .into_iter()
+                .map(|state| LatestReview {
+                    author: "rev".to_string(),
+                    state,
+                })
+                .collect(),
+            head_branch: "feat/x".to_string(),
+            is_cross_repository: false,
+        })
+    }
+
+    #[test]
+    fn test_categorize_draft_even_if_approved() {
+        let p = pr(
+            Relation::Authored,
+            true,
+            enriched(Some(ReviewDecision::Approved), vec![]),
+        );
+        assert_eq!(categorize(&p), Category::Drafts);
+    }
+
+    #[test]
+    fn test_categorize_changes_requested_via_decision() {
+        let p = pr(
+            Relation::Authored,
+            false,
+            enriched(Some(ReviewDecision::ChangesRequested), vec![]),
+        );
+        assert_eq!(categorize(&p), Category::ChangesRequested);
+    }
+
+    #[test]
+    fn test_categorize_approved_via_decision() {
+        let p = pr(
+            Relation::Authored,
+            false,
+            enriched(Some(ReviewDecision::Approved), vec![]),
+        );
+        assert_eq!(categorize(&p), Category::ReadyToMerge);
+    }
+
+    #[test]
+    fn test_categorize_null_decision_falls_back_to_latest_reviews_approved() {
+        let p = pr(
+            Relation::Authored,
+            false,
+            enriched(None, vec![ReviewState::Approved]),
+        );
+        assert_eq!(categorize(&p), Category::ReadyToMerge);
+    }
+
+    #[test]
+    fn test_categorize_null_decision_changes_requested_wins() {
+        let p = pr(
+            Relation::Authored,
+            false,
+            enriched(None, vec![ReviewState::Approved, ReviewState::ChangesRequested]),
+        );
+        assert_eq!(categorize(&p), Category::ChangesRequested);
+    }
+
+    #[test]
+    fn test_categorize_review_required_waits() {
+        let p = pr(
+            Relation::Authored,
+            false,
+            enriched(Some(ReviewDecision::ReviewRequired), vec![]),
+        );
+        assert_eq!(categorize(&p), Category::WaitingForReview);
+    }
+
+    #[test]
+    fn test_categorize_review_requested_relation_short_circuits() {
+        let p = pr(
+            Relation::ReviewRequested,
+            false,
+            enriched(Some(ReviewDecision::Approved), vec![]),
+        );
+        assert_eq!(categorize(&p), Category::NeedsYourReview);
+    }
+
+    #[test]
+    fn test_categorize_loading_non_draft_is_unknown() {
+        let p = pr(Relation::Authored, false, EnrichStatus::Loading);
+        assert_eq!(categorize(&p), Category::Unknown);
+        let p = pr(Relation::Authored, false, EnrichStatus::Failed);
+        assert_eq!(categorize(&p), Category::Unknown);
+    }
+
+    #[test]
+    fn test_merge_blocker_label() {
+        assert_eq!(merge_blocker_label(MergeState::Behind), Some("out of date"));
+        assert_eq!(merge_blocker_label(MergeState::Dirty), Some("conflicts"));
+        assert_eq!(
+            merge_blocker_label(MergeState::Unstable),
+            Some("failing/pending checks")
+        );
+        assert_eq!(merge_blocker_label(MergeState::Clean), None);
+        assert_eq!(merge_blocker_label(MergeState::Unknown), None);
+    }
+
+    #[test]
+    fn test_parse_merge_state_unknown_does_not_panic() {
+        assert_eq!(parse_merge_state("UNKNOWN"), MergeState::Unknown);
+        assert_eq!(parse_merge_state("HAS_HOOKS"), MergeState::Unknown);
+        assert_eq!(parse_merge_state("CLEAN"), MergeState::Clean);
+    }
+
+    #[test]
+    fn test_summarize_checks_mixed_and_empty() {
+        let checks = vec![
+            RawCheck {
+                status: "COMPLETED".to_string(),
+                conclusion: "SUCCESS".to_string(),
+                state: String::new(),
+            },
+            RawCheck {
+                status: "COMPLETED".to_string(),
+                conclusion: "FAILURE".to_string(),
+                state: String::new(),
+            },
+            RawCheck {
+                status: "IN_PROGRESS".to_string(),
+                conclusion: String::new(),
+                state: String::new(),
+            },
+            RawCheck {
+                status: String::new(),
+                conclusion: String::new(),
+                state: "PENDING".to_string(),
+            },
+        ];
+        let summary = summarize_checks(&checks);
+        assert_eq!(summary.passing, 1);
+        assert_eq!(summary.failing, 1);
+        assert_eq!(summary.pending, 2);
+
+        assert_eq!(summarize_checks(&[]), ChecksSummary::default());
+    }
+
+    #[test]
+    fn test_parse_pr_view_full_payload() {
+        let json = r#"{
+          "reviewDecision":"APPROVED",
+          "mergeStateStatus":"BEHIND",
+          "statusCheckRollup":[
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"build"},
+            {"__typename":"StatusContext","state":"PENDING","context":"ci"}
+          ],
+          "reviewRequests":[{"__typename":"User","login":"alice"},{"__typename":"Team","slug":"backend","name":"Backend"}],
+          "latestReviews":[{"author":{"login":"bob"},"state":"APPROVED"}],
+          "headRefName":"feat/expose",
+          "isCrossRepository":true
+        }"#;
+
+        let e = parse_pr_view(json).unwrap();
+        assert_eq!(e.review_decision, Some(ReviewDecision::Approved));
+        assert_eq!(e.merge_state, MergeState::Behind);
+        assert_eq!(e.checks.passing, 1);
+        assert_eq!(e.checks.pending, 1);
+        assert_eq!(
+            e.review_requests,
+            vec![
+                ReviewerRef::User("alice".to_string()),
+                ReviewerRef::Team("backend".to_string())
+            ]
+        );
+        assert_eq!(e.latest_reviews.len(), 1);
+        assert_eq!(e.latest_reviews[0].state, ReviewState::Approved);
+        assert_eq!(e.head_branch, "feat/expose");
+        assert!(e.is_cross_repository);
+    }
+
+    #[test]
+    fn test_parse_pr_view_missing_rollup_is_zero() {
+        let json = r#"{"reviewDecision":"","mergeStateStatus":"UNKNOWN","headRefName":"main","isCrossRepository":false}"#;
+        let e = parse_pr_view(json).unwrap();
+        assert_eq!(e.review_decision, None);
+        assert_eq!(e.merge_state, MergeState::Unknown);
+        assert_eq!(e.checks, ChecksSummary::default());
+        assert!(e.review_requests.is_empty());
     }
 }
