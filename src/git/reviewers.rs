@@ -358,6 +358,8 @@ pub fn gather(owner: &str, repo: &str, number: u64) -> Result<PrFootprint, PrErr
     parse_footprint(&stdout)
 }
 
+// Does not use pr_search::gh_capture: needs a custom Accept header and treats a
+// missing file as a best-effort None rather than a surfaced error.
 fn fetch_codeowners(owner: &str, repo: &str) -> Option<String> {
     for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] {
         if let Ok(output) = Command::new("gh")
@@ -380,6 +382,8 @@ fn fetch_codeowners(owner: &str, repo: &str) -> Option<String> {
     None
 }
 
+// Does not use pr_search::gh_capture: needs the `--jq` flag and degrades to an
+// empty tally on error rather than aborting the whole suggestion.
 fn fetch_commit_authors(owner: &str, repo: &str, path: &str) -> Vec<String> {
     let endpoint = format!(
         "repos/{owner}/{repo}/commits?path={}&per_page=30",

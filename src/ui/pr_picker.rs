@@ -20,7 +20,7 @@ use miette::IntoDiagnostic;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -365,17 +365,38 @@ fn reviewer_refs_label(refs: &[ReviewerRef]) -> String {
 }
 
 fn render_confirm_merge<'a>(pr: &DashboardPr, method: MergeMethod) -> Paragraph<'a> {
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             format!("Merge {}/{}#{}?", pr.owner, pr.repo, pr.number),
             Style::default().fg(Color::Green).bold(),
         )),
         Line::from(""),
         Line::from(truncate(&pr.title, 70)),
+        Line::from(format!("State:  {}", pr_search::categorize(pr).title())),
         Line::from(format!("Method: {}", method.label())),
-        Line::from(""),
-        Line::from("Press enter/y to merge, esc/n to cancel."),
     ];
+
+    // Surface the captured PR's state so the user isn't merging blind. `gh`
+    // still enforces the real gate; this is a visible heads-up.
+    let caveat = match &pr.status {
+        _ if pr.is_draft => Some("This PR is a draft — gh will refuse to merge it.".to_string()),
+        EnrichStatus::Loading => {
+            Some("Status not loaded yet — consider refreshing (ctrl+r) first.".to_string())
+        }
+        EnrichStatus::Failed => Some("Status unavailable — merge state unknown.".to_string()),
+        EnrichStatus::Ready(e) => pr_search::merge_blocker_label(e.merge_state)
+            .map(|label| format!("Heads up: {label}.")),
+    };
+    if let Some(caveat) = caveat {
+        lines.push(Line::from(Span::styled(
+            caveat,
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from("Press enter/y to merge, esc/n to cancel."));
+
     Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" Confirm Merge "))
         .wrap(Wrap { trim: false })
@@ -569,6 +590,9 @@ pub fn run(
 
     let mut query = String::new();
     let mut selected = 0usize;
+    // Identity of the highlighted PR, so the cursor stays on the same PR as
+    // background enrichment recategorizes and reflows the list.
+    let mut selected_id: Option<PrId> = None;
     let mut scroll = 0usize;
     let mut mode = Mode::List;
     let mut status: Option<String> = None;
@@ -596,14 +620,30 @@ pub fn run(
             }
         }
 
-        // Stream enrichment as it lands.
+        // Stream enrichment as it lands. On Disconnected (all workers done, or
+        // the coordinator died), mark any straggler still Loading as Failed so it
+        // shows a `status?` badge instead of spinning forever, and drop the rx.
         if let Some(rx) = &enrich_rx {
-            while let Ok((id, res)) = rx.try_recv() {
-                if let Some(pr) = prs.iter_mut().find(|p| p.id() == id) {
-                    pr.status = match res {
-                        Ok(e) => EnrichStatus::Ready(e),
-                        Err(_) => EnrichStatus::Failed,
-                    };
+            loop {
+                match rx.try_recv() {
+                    Ok((id, res)) => {
+                        if let Some(pr) = prs.iter_mut().find(|p| p.id() == id) {
+                            pr.status = match res {
+                                Ok(e) => EnrichStatus::Ready(e),
+                                Err(_) => EnrichStatus::Failed,
+                            };
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        for pr in prs.iter_mut() {
+                            if matches!(pr.status, EnrichStatus::Loading) {
+                                pr.status = EnrichStatus::Failed;
+                            }
+                        }
+                        enrich_rx = None;
+                        break;
+                    }
                 }
             }
         }
@@ -617,9 +657,16 @@ pub fn run(
         }
 
         let display = build_display(&prs, &query);
+        // Re-anchor the cursor to the same PR after a reflow; fall back to clamp.
+        if let Some(id) = &selected_id
+            && let Some(pos) = display.prs.iter().position(|p| p.id() == *id)
+        {
+            selected = pos;
+        }
         if !display.prs.is_empty() && selected >= display.prs.len() {
             selected = display.prs.len() - 1;
         }
+        selected_id = display.prs.get(selected).map(DashboardPr::id);
         let scope = scopes[scope_index].clone();
         let title = list_title(&scope, display.prs.len(), prs.len(), searching);
 
@@ -757,8 +804,18 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                             status = Some(
                                 match pr_actions::mark_ready(&pr.owner, &pr.repo, pr.number) {
                                     Ok(()) => {
-                                        if let Some(p) = prs.iter_mut().find(|p| p.id() == pr.id()) {
+                                        // Re-enrich so the PR leaves Drafts into its
+                                        // real review bucket instead of Unknown.
+                                        let fresh = pr_search::enrich_one(
+                                            &pr.owner, &pr.repo, pr.number,
+                                        );
+                                        if let Some(p) =
+                                            prs.iter_mut().find(|p| p.id() == pr.id())
+                                        {
                                             p.is_draft = false;
+                                            if let Ok(e) = fresh {
+                                                p.status = EnrichStatus::Ready(e);
+                                            }
                                         }
                                         format!("Marked #{} ready", pr.number)
                                     }
@@ -799,14 +856,18 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                         status = Some("Refreshing…".to_string());
                     }
                     (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                        scope_index = (scope_index + 1) % scopes.len();
-                        prs.clear();
-                        selected = 0;
-                        scroll = 0;
-                        searching = true;
-                        search_error = None;
-                        enrich_rx = None;
-                        search_rx = Some(pr_search::spawn_search(scopes[scope_index].clone()));
+                        if scopes.len() > 1 {
+                            scope_index = (scope_index + 1) % scopes.len();
+                            prs.clear();
+                            selected = 0;
+                            scroll = 0;
+                            searching = true;
+                            search_error = None;
+                            enrich_rx = None;
+                            search_rx = Some(pr_search::spawn_search(scopes[scope_index].clone()));
+                        } else {
+                            status = Some("Only one scope available".to_string());
+                        }
                     }
                     (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                         selected = selected.saturating_sub(1);
@@ -866,6 +927,10 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                 _ => {}
             },
         }
+
+        // Re-anchor after navigation so the next frame keeps the cursor on the
+        // PR the user moved to (not the one the previous frame resolved to).
+        selected_id = display.prs.get(selected).map(DashboardPr::id);
     }
 }
 
