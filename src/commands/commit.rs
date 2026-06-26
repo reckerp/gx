@@ -1,12 +1,10 @@
+use crate::ai;
 use crate::config;
-use crate::config::Agent;
 use crate::git;
 use crate::git::GitError;
 use crate::git::commit::CommitOptions;
 use crate::ui;
 use miette::{Diagnostic, Result};
-use std::io::Write;
-use std::process::{Command, Stdio};
 use thiserror::Error;
 
 const COMMIT_MESSAGE_PROMPT: &str = r#"Analyze this git diff and generate a conventional commit message following these rules:
@@ -110,7 +108,8 @@ fn run_ai_commit(amend: bool) -> Result<()> {
     let agent = config.ai.get_agent().map_err(CommitError::AiError)?;
     let model = &config.ai.model;
 
-    let ai_message = generate_commit_message(&diff, &agent, model)?;
+    let ai_message = ai::run_capturing(&agent, model, COMMIT_MESSAGE_PROMPT, Some(&diff))
+        .map_err(|e| CommitError::AiError(e.to_string()))?;
 
     println!("AI generated commit message:\n");
     println!("  {}\n", ai_message);
@@ -130,73 +129,4 @@ fn run_ai_commit(amend: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn build_agent_command(agent: &Agent, model: &str) -> (String, Vec<String>) {
-    match agent {
-        Agent::OpenCode => (
-            "opencode".to_string(),
-            vec![
-                "run".to_string(),
-                COMMIT_MESSAGE_PROMPT.to_string(),
-                "--model".to_string(),
-                model.to_string(),
-            ],
-        ),
-        Agent::Claude => (
-            "claude".to_string(),
-            vec![
-                "-p".to_string(),
-                COMMIT_MESSAGE_PROMPT.to_string(),
-                "--model".to_string(),
-                model.to_string(),
-            ],
-        ),
-    }
-}
-
-fn generate_commit_message(diff: &str, agent: &Agent, model: &str) -> Result<String, CommitError> {
-    let (command, args) = build_agent_command(agent, model);
-
-    let mut child = Command::new(&command)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| CommitError::AiError(format!("Failed to spawn {}: {}", command, e)))?;
-
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| CommitError::AiError("Failed to open stdin".to_string()))?;
-        stdin
-            .write_all(diff.as_bytes())
-            .map_err(|e| CommitError::AiError(format!("Failed to write to stdin: {}", e)))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CommitError::AiError(format!("Failed to wait for {}: {}", command, e)))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CommitError::AiError(format!(
-            "{} failed: {}",
-            command,
-            stderr.trim()
-        )));
-    }
-
-    let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if message.is_empty() {
-        return Err(CommitError::AiError(format!(
-            "{} returned empty message",
-            command
-        )));
-    }
-
-    Ok(message)
 }

@@ -1,3 +1,4 @@
+mod ai;
 mod args;
 mod browser;
 mod clipboard;
