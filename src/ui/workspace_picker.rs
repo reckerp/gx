@@ -25,6 +25,8 @@ pub enum WorkspaceAction {
     Update(Vec<Worktree>),
     /// Re-copy setup files into selected workspaces
     Setup(Vec<Worktree>),
+    /// Open the highlighted workspace in `$EDITOR`
+    OpenEditor(Worktree),
     /// Create a new workspace; `name` is pre-filled from the search query
     Create { name: String },
 }
@@ -368,6 +370,20 @@ fn pr_urls_for_targets(
     urls
 }
 
+/// Copy the given PR URLs (newline-joined) to the clipboard and return a short
+/// message describing the outcome, for the picker's footer toast.
+fn copy_pr_urls(urls: &[String]) -> String {
+    if urls.is_empty() {
+        return "No pull request to copy".to_string();
+    }
+
+    match crate::clipboard::copy(&urls.join("\n")) {
+        Ok(()) if urls.len() == 1 => "Copied PR URL to clipboard".to_string(),
+        Ok(()) => format!("Copied {} PR URLs to clipboard", urls.len()),
+        Err(_) => "Could not access clipboard".to_string(),
+    }
+}
+
 fn toggle_selection(worktree: Option<&Worktree>, selected_paths: &mut HashSet<PathBuf>) {
     let Some(worktree) = worktree else {
         return;
@@ -446,7 +462,9 @@ fn render_help_modal(area: Rect) -> Paragraph<'static> {
         ]),
         Line::from(vec![
             Span::styled("Actions", Style::default().bold()),
-            Span::raw(": enter go, ctrl+n new, ctrl+d remove, ctrl+b remove + delete branches"),
+            Span::raw(
+                ": enter go, ctrl+n new, ctrl+e open in $EDITOR, ctrl+d remove, ctrl+b remove + delete branches",
+            ),
         ]),
         Line::from(vec![
             Span::styled("Bulk actions", Style::default().bold()),
@@ -454,7 +472,9 @@ fn render_help_modal(area: Rect) -> Paragraph<'static> {
         ]),
         Line::from(vec![
             Span::styled("Pull requests", Style::default().bold()),
-            Span::raw(": ctrl+o opens the selected (or highlighted) PR(s) in your browser"),
+            Span::raw(
+                ": ctrl+o opens the selected (or highlighted) PR(s) in your browser; ctrl+y copies their URL(s)",
+            ),
         ]),
         Line::from(""),
         Line::from("Selections persist while filtering, so you can search/select several groups."),
@@ -536,6 +556,8 @@ pub fn run(
     let mut scroll_offset = 0;
     let mut selected_paths = HashSet::new();
     let mut mode = Mode::List;
+    // Transient footer message (e.g. "Copied"); cleared on the next keypress.
+    let mut status_message: Option<String> = None;
 
     loop {
         // PR status is fetched off-thread; merge it in as soon as it lands so
@@ -593,23 +615,30 @@ pub fn run(
                             ),
                             middle_chunks[1],
                         );
-                        f.render_widget(
-                            render_help_bar(&[
+                        let footer = match &status_message {
+                            Some(message) => Paragraph::new(Line::from(Span::styled(
+                                format!(" {} ", message),
+                                Style::default().fg(Color::Green).bold(),
+                            )))
+                            .block(Block::default().borders(Borders::ALL).title(" Help ")),
+                            None => render_help_bar(&[
                                 ("^/k", "Up"),
                                 ("v/j", "Down"),
                                 ("Space", "Select"),
                                 ("^a", "All shown"),
                                 ("^u", "Clear"),
                                 ("Enter", "Go"),
+                                ("^e", "Edit"),
                                 ("^o", "Open PR"),
+                                ("^y", "Copy PR URL"),
                                 ("^r", "Update"),
                                 ("^t", "Setup"),
                                 ("^d", "Remove"),
                                 ("^b", "Remove+branch"),
                                 ("?", "Help"),
                             ]),
-                            main_chunks[2],
-                        );
+                        };
+                        f.render_widget(footer, main_chunks[2]);
                     }
                     Mode::ConfirmRemove {
                         worktrees,
@@ -636,125 +665,151 @@ pub fn run(
             && let Event::Key(key) = event::read().into_diagnostic()?
         {
             match mode.clone() {
-                Mode::List => match (key.code, key.modifiers) {
-                    (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        return Ok(None);
-                    }
-                    (KeyCode::Char('?'), _) => {
-                        mode = Mode::Help;
-                    }
-                    (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                        return Ok(Some(WorkspaceAction::Create {
-                            name: query.trim().to_string(),
-                        }));
-                    }
-                    (KeyCode::Char('d'), KeyModifiers::CONTROL)
-                    | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
-                        let delete_branches = matches!(
-                            (key.code, key.modifiers),
-                            (KeyCode::Char('b'), KeyModifiers::CONTROL)
-                        );
-                        let targets = action_targets(
-                            worktrees,
-                            &filtered,
-                            selected_index,
-                            &selected_paths,
-                            false,
-                        );
-                        if !targets.is_empty() {
-                            mode = Mode::ConfirmRemove {
-                                worktrees: targets,
-                                delete_branches,
-                            };
+                Mode::List => {
+                    // Any keypress dismisses a lingering status message; the
+                    // handlers below set a fresh one when they have feedback.
+                    status_message = None;
+                    match (key.code, key.modifiers) {
+                        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            return Ok(None);
                         }
-                    }
-                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-                        let targets = action_targets(
-                            worktrees,
-                            &filtered,
-                            selected_index,
-                            &selected_paths,
-                            true,
-                        );
-                        if !targets.is_empty() {
-                            return Ok(Some(WorkspaceAction::Update(targets)));
+                        (KeyCode::Char('?'), _) => {
+                            mode = Mode::Help;
                         }
-                    }
-                    (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
-                        let targets = action_targets(
-                            worktrees,
-                            &filtered,
-                            selected_index,
-                            &selected_paths,
-                            true,
-                        );
-                        if !targets.is_empty() {
-                            return Ok(Some(WorkspaceAction::Setup(targets)));
+                        (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                            return Ok(Some(WorkspaceAction::Create {
+                                name: query.trim().to_string(),
+                            }));
                         }
-                    }
-                    (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
-                        // Open the selected workspaces' PRs (or the highlighted
-                        // one when nothing is selected) in the browser, staying
-                        // in the picker. Best-effort: a missing opener or a
-                        // workspace without a PR is silently skipped.
-                        let targets = action_targets(
-                            worktrees,
-                            &filtered,
-                            selected_index,
-                            &selected_paths,
-                            true,
-                        );
-                        for url in pr_urls_for_targets(&targets, &summaries) {
-                            let _ = crate::browser::open(&url);
+                        (KeyCode::Char('d'), KeyModifiers::CONTROL)
+                        | (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                            let delete_branches = matches!(
+                                (key.code, key.modifiers),
+                                (KeyCode::Char('b'), KeyModifiers::CONTROL)
+                            );
+                            let targets = action_targets(
+                                worktrees,
+                                &filtered,
+                                selected_index,
+                                &selected_paths,
+                                false,
+                            );
+                            if !targets.is_empty() {
+                                mode = Mode::ConfirmRemove {
+                                    worktrees: targets,
+                                    delete_branches,
+                                };
+                            }
                         }
-                    }
-                    (KeyCode::Char(' '), _) => {
-                        toggle_selection(filtered.get(selected_index), &mut selected_paths);
-                    }
-                    (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-                        toggle_visible_selection(&filtered, &mut selected_paths);
-                    }
-                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                        selected_paths.clear();
-                    }
-                    (KeyCode::Enter, _) => {
-                        if let Some(w) = filtered.get(selected_index) {
-                            return Ok(Some(WorkspaceAction::Go(w.clone())));
+                        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                            let targets = action_targets(
+                                worktrees,
+                                &filtered,
+                                selected_index,
+                                &selected_paths,
+                                true,
+                            );
+                            if !targets.is_empty() {
+                                return Ok(Some(WorkspaceAction::Update(targets)));
+                            }
                         }
-                    }
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        selected_index = selected_index.saturating_sub(1);
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        if selected_index + 1 < filtered.len() {
-                            selected_index += 1;
+                        (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                            let targets = action_targets(
+                                worktrees,
+                                &filtered,
+                                selected_index,
+                                &selected_paths,
+                                true,
+                            );
+                            if !targets.is_empty() {
+                                return Ok(Some(WorkspaceAction::Setup(targets)));
+                            }
                         }
+                        (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+                            // Open the selected workspaces' PRs (or the highlighted
+                            // one when nothing is selected) in the browser, staying
+                            // in the picker. Best-effort: a missing opener or a
+                            // workspace without a PR is silently skipped.
+                            let targets = action_targets(
+                                worktrees,
+                                &filtered,
+                                selected_index,
+                                &selected_paths,
+                                true,
+                            );
+                            for url in pr_urls_for_targets(&targets, &summaries) {
+                                let _ = crate::browser::open(&url);
+                            }
+                        }
+                        (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                            // Copy the selected (or highlighted) PR URL(s) to the
+                            // clipboard, staying in the picker.
+                            let targets = action_targets(
+                                worktrees,
+                                &filtered,
+                                selected_index,
+                                &selected_paths,
+                                true,
+                            );
+                            let urls = pr_urls_for_targets(&targets, &summaries);
+                            status_message = Some(copy_pr_urls(&urls));
+                        }
+                        (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                            // Open the highlighted workspace in $EDITOR. This tears
+                            // down the TUI (the editor needs the terminal), so it is
+                            // returned as an action rather than handled inline.
+                            if let Some(w) = filtered.get(selected_index) {
+                                return Ok(Some(WorkspaceAction::OpenEditor(w.clone())));
+                            }
+                        }
+                        (KeyCode::Char(' '), _) => {
+                            toggle_selection(filtered.get(selected_index), &mut selected_paths);
+                        }
+                        (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                            toggle_visible_selection(&filtered, &mut selected_paths);
+                        }
+                        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                            selected_paths.clear();
+                        }
+                        (KeyCode::Enter, _) => {
+                            if let Some(w) = filtered.get(selected_index) {
+                                return Ok(Some(WorkspaceAction::Go(w.clone())));
+                            }
+                        }
+                        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                            selected_index = selected_index.saturating_sub(1);
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                            if selected_index + 1 < filtered.len() {
+                                selected_index += 1;
+                            }
+                        }
+                        (KeyCode::PageUp, _) => {
+                            selected_index = selected_index.saturating_sub(10);
+                        }
+                        (KeyCode::PageDown, _) => {
+                            selected_index =
+                                (selected_index + 10).min(filtered.len().saturating_sub(1));
+                        }
+                        (KeyCode::Home, _) => {
+                            selected_index = 0;
+                        }
+                        (KeyCode::End, _) => {
+                            selected_index = filtered.len().saturating_sub(1);
+                        }
+                        (KeyCode::Backspace, _) => {
+                            query.pop();
+                            selected_index = 0;
+                            scroll_offset = 0;
+                        }
+                        (KeyCode::Char(c), _) => {
+                            query.push(c);
+                            selected_index = 0;
+                            scroll_offset = 0;
+                        }
+                        _ => {}
                     }
-                    (KeyCode::PageUp, _) => {
-                        selected_index = selected_index.saturating_sub(10);
-                    }
-                    (KeyCode::PageDown, _) => {
-                        selected_index =
-                            (selected_index + 10).min(filtered.len().saturating_sub(1));
-                    }
-                    (KeyCode::Home, _) => {
-                        selected_index = 0;
-                    }
-                    (KeyCode::End, _) => {
-                        selected_index = filtered.len().saturating_sub(1);
-                    }
-                    (KeyCode::Backspace, _) => {
-                        query.pop();
-                        selected_index = 0;
-                        scroll_offset = 0;
-                    }
-                    (KeyCode::Char(c), _) => {
-                        query.push(c);
-                        selected_index = 0;
-                        scroll_offset = 0;
-                    }
-                    _ => {}
-                },
+                }
                 Mode::ConfirmRemove {
                     worktrees,
                     delete_branches,

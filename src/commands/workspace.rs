@@ -80,6 +80,13 @@ pub enum WorkspaceError {
     #[error("Failed to create workspace directory: {0}")]
     #[diagnostic(code(gx::workspace::create_dir_failed))]
     CreateDirFailed(io::Error),
+
+    #[error("Could not open editor: {0}")]
+    #[diagnostic(
+        code(gx::workspace::editor_failed),
+        help("Set $EDITOR (or $VISUAL) to your editor, e.g. 'export EDITOR=nvim'")
+    )]
+    EditorFailed(String),
 }
 
 /// Create a new workspace (worktree) and print its path to stdout so the
@@ -240,6 +247,7 @@ pub fn run_go(query: Option<String>) -> Result<()> {
                 WorkspaceAction::Setup(worktrees_to_setup) => {
                     return setup_worktrees(&worktrees_to_setup, &worktrees);
                 }
+                WorkspaceAction::OpenEditor(worktree) => return open_in_editor(&worktree),
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
         }
@@ -330,6 +338,7 @@ pub fn run_remove(query: Option<String>, force: bool, delete_branch: bool) -> Re
                 WorkspaceAction::Setup(worktrees_to_setup) => {
                     return setup_worktrees(&worktrees_to_setup, &worktrees);
                 }
+                WorkspaceAction::OpenEditor(worktree) => return open_in_editor(&worktree),
                 WorkspaceAction::Create { name } => return create_from_picker(name),
             }
         }
@@ -420,6 +429,7 @@ pub fn run_interactive() -> Result<()> {
         WorkspaceAction::Setup(worktrees_to_setup) => {
             setup_worktrees(&worktrees_to_setup, &worktrees)
         }
+        WorkspaceAction::OpenEditor(worktree) => open_in_editor(&worktree),
         WorkspaceAction::Create { name } => create_from_picker(name),
     }
 }
@@ -457,6 +467,78 @@ fn create_from_picker(name: String) -> Result<()> {
     }
 
     run_new(name, None, None, false)
+}
+
+/// Open a workspace in the user's editor, resolved from `$VISUAL`, then
+/// `$EDITOR`, with a platform fallback. The editor runs attached to the
+/// terminal and gx waits for it, which is correct for terminal editors
+/// (vim, nano, …) and for GUI editors invoked with a blocking flag
+/// (e.g. `code --wait`).
+fn open_in_editor(worktree: &Worktree) -> Result<()> {
+    let editor = editor_command();
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| WorkspaceError::EditorFailed("no editor configured".to_string()))?;
+    let args: Vec<&str> = parts.collect();
+
+    eprintln!("Opening '{}' in {}", worktree.name, program);
+
+    let mut command = std::process::Command::new(program);
+    command
+        .args(&args)
+        .arg(&worktree.path)
+        .current_dir(&worktree.path);
+
+    // The picker renders to stderr because gx's stdout may be captured by the
+    // `gx setup` shell wrapper's `$(...)`. A terminal editor needs a real tty
+    // on stdout, so point it at the controlling terminal when ours is not one;
+    // stdin and stderr are already the terminal, so they stay inherited.
+    #[cfg(unix)]
+    {
+        use std::io::IsTerminal;
+        if !io::stdout().is_terminal()
+            && let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty")
+        {
+            command.stdout(tty);
+        }
+    }
+
+    let status = command.status().map_err(|e| {
+        WorkspaceError::EditorFailed(format!("could not launch '{}': {}", program, e))
+    })?;
+
+    if !status.success() {
+        return Err(WorkspaceError::EditorFailed(format!(
+            "{} exited with {}",
+            program,
+            display_exit_status(&status)
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+/// The editor command to use, from `$VISUAL` then `$EDITOR`, falling back to a
+/// platform default. May contain arguments (e.g. "code --wait").
+fn editor_command() -> String {
+    resolve_editor(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok())
+}
+
+fn resolve_editor(visual: Option<String>, editor: Option<String>) -> String {
+    visual
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| editor.filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(default_editor)
+}
+
+fn default_editor() -> String {
+    if cfg!(windows) {
+        "notepad".to_string()
+    } else {
+        "vi".to_string()
+    }
 }
 
 fn update_worktrees(worktrees_to_update: &[Worktree], base: Option<String>) -> Result<()> {
@@ -998,5 +1080,26 @@ mod tests {
         let prompt = remove_prompt(&[feature], true);
 
         assert!(prompt.contains("delete its local branch"));
+    }
+
+    #[test]
+    fn test_resolve_editor_prefers_visual_then_editor() {
+        assert_eq!(
+            resolve_editor(Some("code --wait".to_string()), Some("vim".to_string())),
+            "code --wait"
+        );
+        assert_eq!(resolve_editor(None, Some("vim".to_string())), "vim");
+    }
+
+    #[test]
+    fn test_resolve_editor_ignores_blank_and_falls_back_to_default() {
+        // A blank $VISUAL is skipped in favour of $EDITOR.
+        assert_eq!(
+            resolve_editor(Some("   ".to_string()), Some("nano".to_string())),
+            "nano"
+        );
+        // Nothing usable set -> platform default.
+        assert_eq!(resolve_editor(None, None), default_editor());
+        assert_eq!(resolve_editor(Some(String::new()), None), default_editor());
     }
 }
