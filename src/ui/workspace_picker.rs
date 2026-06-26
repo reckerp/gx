@@ -1,5 +1,6 @@
 use super::{TermStderr, render_help_bar};
-use crate::git::worktree::{Worktree, WorktreeSummary};
+use crate::git::pull_request::{PullRequestLookup, PullRequestState, PullRequestStatus};
+use crate::git::worktree::{Worktree, WorktreeSummary, apply_pull_requests};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::IntoDiagnostic;
@@ -7,6 +8,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -155,6 +157,13 @@ fn render_workspace_list<'a>(
 fn render_summary_badges(summary: &WorktreeSummary) -> Vec<Span<'static>> {
     let mut badges = Vec::new();
 
+    if let PullRequestStatus::Found(pull_request) = &summary.pull_request {
+        badges.push(Span::styled(
+            format!(" PR#{}:{}", pull_request.number, pull_request.state.label()),
+            pr_style(pull_request.state),
+        ));
+    }
+
     if summary.tracked_changes > 0 {
         badges.push(Span::styled(
             format!(" dirty:{}", summary.tracked_changes),
@@ -197,6 +206,36 @@ fn render_summary_badges(summary: &WorktreeSummary) -> Vec<Span<'static>> {
     badges
 }
 
+fn pr_style(state: PullRequestState) -> Style {
+    match state {
+        PullRequestState::Open => Style::default().fg(Color::Green),
+        PullRequestState::Draft => Style::default().fg(Color::Yellow),
+        PullRequestState::Merged => Style::default().fg(Color::Magenta),
+        PullRequestState::Closed => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn render_pull_request_lines(lines: &mut Vec<String>, summary: &WorktreeSummary) {
+    lines.push(String::new());
+    lines.push("Pull request:".to_string());
+
+    match &summary.pull_request {
+        PullRequestStatus::Found(pull_request) => {
+            lines.push(format!(
+                "  #{} {}",
+                pull_request.number,
+                pull_request.state.label()
+            ));
+            if !pull_request.url.is_empty() {
+                lines.push(format!("  {}", pull_request.url));
+            }
+        }
+        PullRequestStatus::Loading => lines.push("  Loading…".to_string()),
+        PullRequestStatus::None => lines.push("  None found".to_string()),
+        PullRequestStatus::Error => lines.push("  Could not read PR status with gh".to_string()),
+    }
+}
+
 fn render_info_pane<'a>(
     worktree: Option<&Worktree>,
     all_worktrees: &[Worktree],
@@ -223,6 +262,10 @@ fn render_info_pane<'a>(
         lines.push(format!("  {}", w.path.display()));
 
         if let Some(summary) = summaries.get(&w.path) {
+            if w.branch.is_some() {
+                render_pull_request_lines(&mut lines, summary);
+            }
+
             lines.push(String::new());
             lines.push("Status:".to_string());
             if summary.status_error {
@@ -461,7 +504,8 @@ fn render_remove_confirmation<'a>(
 pub fn run(
     terminal: &mut TermStderr,
     worktrees: &[Worktree],
-    summaries: &HashMap<PathBuf, WorktreeSummary>,
+    mut summaries: HashMap<PathBuf, WorktreeSummary>,
+    pull_requests: Receiver<PullRequestLookup>,
 ) -> miette::Result<Option<WorkspaceAction>> {
     let mut query = String::new();
     let mut selected_index = 0;
@@ -470,6 +514,12 @@ pub fn run(
     let mut mode = Mode::List;
 
     loop {
+        // PR status is fetched off-thread; merge it in as soon as it lands so
+        // badges "spawn in" without ever blocking the render loop.
+        if let Ok(lookup) = pull_requests.try_recv() {
+            apply_pull_requests(&mut summaries, worktrees, lookup);
+        }
+
         let filtered = filter_worktrees(worktrees, &query);
 
         if selected_index >= filtered.len() && !filtered.is_empty() {
@@ -506,7 +556,7 @@ pub fn run(
                                 scroll_offset,
                                 visible_height,
                                 &selected_paths,
-                                summaries,
+                                &summaries,
                             ),
                             middle_chunks[0],
                         );
@@ -515,7 +565,7 @@ pub fn run(
                                 filtered.get(selected_index),
                                 worktrees,
                                 &selected_paths,
-                                summaries,
+                                &summaries,
                             ),
                             middle_chunks[1],
                         );
@@ -696,6 +746,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::pull_request::{PullRequestState, PullRequestSummary};
 
     fn worktree(name: &str, is_main: bool) -> Worktree {
         Worktree {
@@ -707,6 +758,17 @@ mod tests {
             is_current: false,
             is_bare: false,
             is_locked: false,
+        }
+    }
+
+    fn summary_with_pr(state: PullRequestState) -> WorktreeSummary {
+        WorktreeSummary {
+            pull_request: PullRequestStatus::Found(PullRequestSummary {
+                number: 42,
+                state,
+                url: "https://github.com/acme/repo/pull/42".to_string(),
+            }),
+            ..Default::default()
         }
     }
 
@@ -798,5 +860,33 @@ mod tests {
         assert_eq!(visible_range(0, 0, 5), "0 shown");
         assert_eq!(visible_range(12, 0, 5), "1-5 of 12");
         assert_eq!(visible_range(12, 10, 5), "11-12 of 12");
+    }
+
+    #[test]
+    fn test_render_summary_badges_includes_pr_state() {
+        let badges = render_summary_badges(&summary_with_pr(PullRequestState::Draft));
+
+        assert!(
+            badges
+                .iter()
+                .any(|badge| badge.content.contains("PR#42:draft"))
+        );
+    }
+
+    #[test]
+    fn test_render_summary_badges_hides_pr_while_loading() {
+        // Default summary is in the Loading state; the list must stay clean
+        // until the PR lookup resolves and the badge "spawns in".
+        let badges = render_summary_badges(&WorktreeSummary::default());
+
+        assert!(!badges.iter().any(|badge| badge.content.contains("PR#")));
+    }
+
+    #[test]
+    fn test_render_pull_request_lines_shows_loading_state() {
+        let mut lines = Vec::new();
+        render_pull_request_lines(&mut lines, &WorktreeSummary::default());
+
+        assert!(lines.iter().any(|line| line.contains("Loading")));
     }
 }
