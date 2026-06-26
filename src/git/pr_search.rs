@@ -367,10 +367,11 @@ pub enum Category {
 }
 
 impl Category {
-    /// Display order for both the TUI and `gx pr list`.
+    /// Display order for both the TUI and `gx pr list`. Waiting-for-review (your
+    /// PRs blocked on someone else) leads, since that's the user's own queue.
     pub const ALL: [Category; 6] = [
-        Category::NeedsYourReview,
         Category::WaitingForReview,
+        Category::NeedsYourReview,
         Category::ReadyToMerge,
         Category::ChangesRequested,
         Category::Drafts,

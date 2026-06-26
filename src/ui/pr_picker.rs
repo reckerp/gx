@@ -682,9 +682,15 @@ pub fn run(
                     .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .split(chunks[1]);
 
-                let search_bar = Paragraph::new(query.as_str()).block(
-                    Block::default().borders(Borders::ALL).title(" Filter "),
-                );
+                let search_bar = if query.is_empty() {
+                    Paragraph::new(Span::styled(
+                        "type to filter by title or repo",
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                } else {
+                    Paragraph::new(query.as_str())
+                }
+                .block(Block::default().borders(Borders::ALL).title(" Filter "));
                 f.render_widget(search_bar, chunks[0]);
 
                 match &mode {
