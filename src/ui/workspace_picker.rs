@@ -1,4 +1,5 @@
 use super::{TermStderr, render_help_bar};
+use crate::git::pull_request::PullRequestState;
 use crate::git::worktree::{Worktree, WorktreeSummary};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -155,6 +156,13 @@ fn render_workspace_list<'a>(
 fn render_summary_badges(summary: &WorktreeSummary) -> Vec<Span<'static>> {
     let mut badges = Vec::new();
 
+    if let Some(pull_request) = &summary.pull_request {
+        badges.push(Span::styled(
+            format!(" PR#{}:{}", pull_request.number, pull_request.state.label()),
+            pr_style(pull_request.state),
+        ));
+    }
+
     if summary.tracked_changes > 0 {
         badges.push(Span::styled(
             format!(" dirty:{}", summary.tracked_changes),
@@ -197,6 +205,35 @@ fn render_summary_badges(summary: &WorktreeSummary) -> Vec<Span<'static>> {
     badges
 }
 
+fn pr_style(state: PullRequestState) -> Style {
+    match state {
+        PullRequestState::Open => Style::default().fg(Color::Green),
+        PullRequestState::Draft => Style::default().fg(Color::Yellow),
+        PullRequestState::Merged => Style::default().fg(Color::Magenta),
+        PullRequestState::Closed => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn render_pull_request_lines(lines: &mut Vec<String>, summary: &WorktreeSummary) {
+    lines.push(String::new());
+    lines.push("Pull request:".to_string());
+
+    if let Some(pull_request) = &summary.pull_request {
+        lines.push(format!(
+            "  #{} {}",
+            pull_request.number,
+            pull_request.state.label()
+        ));
+        if !pull_request.url.is_empty() {
+            lines.push(format!("  {}", pull_request.url));
+        }
+    } else if summary.pull_request_error {
+        lines.push("  Could not read PR status with gh".to_string());
+    } else {
+        lines.push("  None found".to_string());
+    }
+}
+
 fn render_info_pane<'a>(
     worktree: Option<&Worktree>,
     all_worktrees: &[Worktree],
@@ -223,6 +260,10 @@ fn render_info_pane<'a>(
         lines.push(format!("  {}", w.path.display()));
 
         if let Some(summary) = summaries.get(&w.path) {
+            if w.branch.is_some() {
+                render_pull_request_lines(&mut lines, summary);
+            }
+
             lines.push(String::new());
             lines.push("Status:".to_string());
             if summary.status_error {
@@ -696,6 +737,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::pull_request::{PullRequestState, PullRequestSummary};
 
     fn worktree(name: &str, is_main: bool) -> Worktree {
         Worktree {
@@ -707,6 +749,17 @@ mod tests {
             is_current: false,
             is_bare: false,
             is_locked: false,
+        }
+    }
+
+    fn summary_with_pr(state: PullRequestState) -> WorktreeSummary {
+        WorktreeSummary {
+            pull_request: Some(PullRequestSummary {
+                number: 42,
+                state,
+                url: "https://github.com/acme/repo/pull/42".to_string(),
+            }),
+            ..Default::default()
         }
     }
 
@@ -798,5 +851,16 @@ mod tests {
         assert_eq!(visible_range(0, 0, 5), "0 shown");
         assert_eq!(visible_range(12, 0, 5), "1-5 of 12");
         assert_eq!(visible_range(12, 10, 5), "11-12 of 12");
+    }
+
+    #[test]
+    fn test_render_summary_badges_includes_pr_state() {
+        let badges = render_summary_badges(&summary_with_pr(PullRequestState::Draft));
+
+        assert!(
+            badges
+                .iter()
+                .any(|badge| badge.content.contains("PR#42:draft"))
+        );
     }
 }

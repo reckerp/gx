@@ -1,5 +1,6 @@
 use super::{GitError, get_repo};
 use crate::git::git_exec::{self, ExecOptions};
+use crate::git::pull_request::PullRequestSummary;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,8 @@ pub struct WorktreeSummary {
     pub untracked_changes: usize,
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
+    pub pull_request: Option<PullRequestSummary>,
+    pub pull_request_error: bool,
     pub status_error: bool,
 }
 
@@ -247,7 +250,7 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
 }
 
 pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
-    worktrees
+    let mut summaries: HashMap<PathBuf, WorktreeSummary> = worktrees
         .iter()
         .map(|worktree| {
             let summary = summarize(worktree).unwrap_or_else(|_| WorktreeSummary {
@@ -256,7 +259,30 @@ pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary
             });
             (worktree.path.clone(), summary)
         })
-        .collect()
+        .collect();
+
+    match crate::git::pull_request::list_for_worktrees(worktrees) {
+        Ok(pull_requests) => {
+            for worktree in worktrees {
+                let Some(branch) = worktree.branch.as_deref() else {
+                    continue;
+                };
+                let Some(pull_request) = pull_requests.get(branch).cloned() else {
+                    continue;
+                };
+                if let Some(summary) = summaries.get_mut(&worktree.path) {
+                    summary.pull_request = Some(pull_request);
+                }
+            }
+        }
+        Err(_) => {
+            for summary in summaries.values_mut() {
+                summary.pull_request_error = true;
+            }
+        }
+    }
+
+    summaries
 }
 
 pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
@@ -284,6 +310,8 @@ pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
         untracked_changes,
         ahead,
         behind,
+        pull_request: None,
+        pull_request_error: false,
         status_error: false,
     })
 }
