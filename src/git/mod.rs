@@ -7,6 +7,7 @@ pub mod log;
 pub mod pr_actions;
 pub mod pr_search;
 pub mod pull_request;
+pub mod reviewers;
 pub mod push;
 pub mod staging;
 pub mod stash;
