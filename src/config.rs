@@ -62,6 +62,44 @@ pub struct Config {
 
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+
+    #[serde(default)]
+    pub pr: PrConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PrConfig {
+    /// Orgs to search in the dashboard's org scope (`--owner` per entry). Empty
+    /// means the org scope is omitted from the scope cycle.
+    #[serde(default)]
+    pub orgs: Vec<String>,
+
+    /// Default merge method for the merge action: "squash", "merge", or "rebase".
+    #[serde(default = "default_merge_method")]
+    pub merge_method: String,
+
+    /// Whether reviewer suggestion falls back to the AI agent when the
+    /// deterministic signal is thin.
+    #[serde(default = "default_reviewer_ai_fallback")]
+    pub reviewer_ai_fallback: bool,
+}
+
+fn default_merge_method() -> String {
+    "squash".to_string()
+}
+
+fn default_reviewer_ai_fallback() -> bool {
+    true
+}
+
+impl Default for PrConfig {
+    fn default() -> Self {
+        PrConfig {
+            orgs: Vec::new(),
+            merge_method: default_merge_method(),
+            reviewer_ai_fallback: default_reviewer_ai_fallback(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -142,11 +180,13 @@ impl Default for Config {
         aliases.insert("gst".to_string(), "stash".to_string());
         aliases.insert("gl".to_string(), "log".to_string());
         aliases.insert("gws".to_string(), "workspace".to_string());
+        aliases.insert("gpr".to_string(), "pr".to_string());
 
         Config {
             aliases,
             ai: AiConfig::default(),
             workspace: WorkspaceConfig::default(),
+            pr: PrConfig::default(),
         }
     }
 }
@@ -174,6 +214,18 @@ mod tests {
         assert_eq!(config.ai.model, "opencode/big-pickle");
         assert_eq!(config.workspace.root, "~/gx/workspaces/{repo}");
         assert_eq!(config.workspace.copy_files, vec![".env".to_string()]);
+        assert_eq!(config.aliases.get("gpr").map(String::as_str), Some("pr"));
+        assert_eq!(config.pr.merge_method, "squash");
+        assert!(config.pr.reviewer_ai_fallback);
+        assert!(config.pr.orgs.is_empty());
+    }
+
+    #[test]
+    fn test_default_pr_config() {
+        let pr = PrConfig::default();
+        assert_eq!(pr.merge_method, "squash");
+        assert!(pr.reviewer_ai_fallback);
+        assert!(pr.orgs.is_empty());
     }
 
     #[test]

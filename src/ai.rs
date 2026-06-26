@@ -13,32 +13,24 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum AiError {
-    #[error("Failed to spawn {agent}: {source}")]
+    #[error("{0}")]
     #[diagnostic(
         code(gx::ai::spawn_failed),
         help("Ensure the configured AI agent is installed and available in your PATH")
     )]
-    Spawn {
-        agent: String,
-        #[source]
-        source: std::io::Error,
-    },
+    Spawn(String),
 
-    #[error("{agent} failed: {message}")]
+    #[error("{0}")]
     #[diagnostic(code(gx::ai::agent_failed))]
-    Failed { agent: String, message: String },
+    Failed(String),
 
-    #[error("{agent} returned an empty response")]
+    #[error("{0} returned an empty response")]
     #[diagnostic(code(gx::ai::empty_response))]
-    Empty { agent: String },
+    Empty(String),
 
-    #[error("I/O error talking to {agent}: {source}")]
+    #[error("{0}")]
     #[diagnostic(code(gx::ai::io_error))]
-    Io {
-        agent: String,
-        #[source]
-        source: std::io::Error,
-    },
+    Io(String),
 }
 
 /// Build the `(command, args)` needed to run `prompt` with the given agent and
@@ -92,45 +84,36 @@ pub fn run_capturing(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|source| AiError::Spawn {
-            agent: command.clone(),
-            source,
-        })?;
+        .map_err(|e| AiError::Spawn(format!("Failed to spawn {command}: {e}")))?;
 
     if let Some(input) = stdin {
         // Take the handle and drop it after writing so the agent sees EOF.
-        let mut handle = child.stdin.take().ok_or_else(|| AiError::Failed {
-            agent: command.clone(),
-            message: "failed to open stdin".to_string(),
-        })?;
+        let mut handle = child
+            .stdin
+            .take()
+            .ok_or_else(|| AiError::Failed(format!("{command}: failed to open stdin")))?;
         handle
             .write_all(input.as_bytes())
-            .map_err(|source| AiError::Io {
-                agent: command.clone(),
-                source,
-            })?;
+            .map_err(|e| AiError::Io(format!("I/O error talking to {command}: {e}")))?;
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|source| AiError::Io {
-            agent: command.clone(),
-            source,
-        })?;
+        .map_err(|e| AiError::Io(format!("I/O error talking to {command}: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
+        let detail = if stderr.is_empty() {
             "agent exited with an error".to_string()
         } else {
             stderr
         };
-        return Err(AiError::Failed { agent: command, message });
+        return Err(AiError::Failed(format!("{command} failed: {detail}")));
     }
 
     let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if message.is_empty() {
-        return Err(AiError::Empty { agent: command });
+        return Err(AiError::Empty(command));
     }
 
     Ok(message)
@@ -151,7 +134,7 @@ pub fn launch_interactive(
         .args(&args)
         .current_dir(cwd)
         .status()
-        .map_err(|source| AiError::Spawn { agent: command, source })
+        .map_err(|e| AiError::Spawn(format!("Failed to spawn {command}: {e}")))
 }
 
 #[cfg(test)]

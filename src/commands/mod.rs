@@ -4,6 +4,7 @@ pub mod commit;
 pub mod external;
 pub mod log;
 pub mod onboarding;
+pub mod pr;
 pub mod push;
 pub mod setup;
 pub mod stash;

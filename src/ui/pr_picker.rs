@@ -73,7 +73,7 @@ fn category_color(c: Category) -> Color {
 #[derive(Clone)]
 enum Mode {
     List,
-    ConfirmMerge { pr: DashboardPr, method: MergeMethod },
+    ConfirmMerge { pr: Box<DashboardPr>, method: MergeMethod },
     Reviewers,
     Help,
 }
@@ -533,15 +533,13 @@ fn compute_reviewers(
         Err(e) => ReviewerOutcome::Error(e.to_string()),
         Ok(rec) => {
             let thin = rec.confidence == Confidence::Thin;
-            if thin && ai_fallback {
-                if let Some(a) = agent {
-                    let prompt = build_reviewer_prompt(owner, repo, number);
-                    if let Ok(text) = ai::run_capturing(&a, model, &prompt, None) {
-                        return ReviewerOutcome::Ai {
-                            deterministic: rec,
-                            ai_text: text,
-                        };
-                    }
+            if thin && ai_fallback && let Some(a) = agent {
+                let prompt = build_reviewer_prompt(owner, repo, number);
+                if let Ok(text) = ai::run_capturing(&a, model, &prompt, None) {
+                    return ReviewerOutcome::Ai {
+                        deterministic: rec,
+                        ai_text: text,
+                    };
                 }
             }
             ReviewerOutcome::Deterministic(rec)
@@ -765,7 +763,7 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                     (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
                         if let Some(pr) = current {
                             mode = Mode::ConfirmMerge {
-                                pr,
+                                pr: Box::new(pr),
                                 method: merge_method,
                             };
                         }

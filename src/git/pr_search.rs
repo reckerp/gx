@@ -5,7 +5,6 @@
 //! `gh search prs` (a fixed, flat field set), then per-PR enrichment (in this
 //! module's U3 half) fills in review/merge/check status via `gh pr view`.
 
-use super::github;
 use miette::Diagnostic;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -100,12 +99,6 @@ pub struct ChecksSummary {
     pub pending: u32,
 }
 
-impl ChecksSummary {
-    pub fn total(&self) -> u32 {
-        self.passing + self.failing + self.pending
-    }
-}
-
 /// A requested reviewer, which may be an individual or a team.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewerRef {
@@ -174,15 +167,6 @@ impl DashboardPr {
             repo: self.repo.clone(),
             number: self.number,
         }
-    }
-}
-
-/// Default scope at startup: the current repo when detectable from `origin`,
-/// otherwise everything.
-pub fn default_scope() -> Scope {
-    match github::origin_owner_repo() {
-        Ok(Some((owner, repo))) => Scope::CurrentRepo { owner, repo },
-        _ => Scope::Global,
     }
 }
 

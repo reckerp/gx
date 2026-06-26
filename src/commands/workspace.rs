@@ -880,8 +880,8 @@ fn remove_prompt(worktrees_to_remove: &[Worktree], delete_branches: bool) -> Str
 }
 
 /// Print the path the shell wrapper should cd into. This is the only thing
-/// workspace commands write to stdout.
-fn print_go_path(path: &Path) {
+/// workspace commands (and the PR dashboard's workspace actions) write to stdout.
+pub(crate) fn print_go_path(path: &Path) {
     use std::io::IsTerminal;
 
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
