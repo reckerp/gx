@@ -212,12 +212,12 @@ fn search_args(scope: &Scope, relation: Relation) -> Vec<String> {
     args
 }
 
-/// Run a single search and return the matching PRs (status `Loading`).
-pub fn search(scope: &Scope, relation: Relation) -> Result<Vec<DashboardPr>, PrError> {
-    let args = search_args(scope, relation);
-
+/// Run `gh` with `args` and return stdout, mapping a missing binary to
+/// `GhNotFound` and any non-zero exit to `GhFailed(stderr)`. Shared by every
+/// PR-dashboard `gh` call so the spawn + error-mapping lives in one place.
+pub(crate) fn gh_capture(args: &[&str]) -> Result<String, PrError> {
     let output = Command::new("gh")
-        .args(&args)
+        .args(args)
         .env("GH_PROMPT_DISABLED", "1")
         .output()
         .map_err(|e| match e.kind() {
@@ -234,7 +234,14 @@ pub fn search(scope: &Scope, relation: Relation) -> Result<Vec<DashboardPr>, PrE
         }));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run a single search and return the matching PRs (status `Loading`).
+pub fn search(scope: &Scope, relation: Relation) -> Result<Vec<DashboardPr>, PrError> {
+    let args = search_args(scope, relation);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let stdout = gh_capture(&arg_refs)?;
     parse_search(&stdout, relation)
 }
 
@@ -265,11 +272,22 @@ pub fn dedup_prs(
 pub fn spawn_search(scope: Scope) -> Receiver<SearchResult> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let combined = (|| {
-            let authored = search(&scope, Relation::Authored)?;
-            let review_requested = search(&scope, Relation::ReviewRequested)?;
-            Ok(dedup_prs(authored, review_requested))
-        })();
+        // Run both relation searches concurrently — they hit a tighter,
+        // separate GitHub search-rate bucket, so halving wall-clock matters.
+        let combined = thread::scope(|s| {
+            let authored = s.spawn(|| search(&scope, Relation::Authored));
+            let review = s.spawn(|| search(&scope, Relation::ReviewRequested));
+            let authored = authored
+                .join()
+                .unwrap_or_else(|_| Err(PrError::GhFailed("search thread panicked".to_string())));
+            let review = review
+                .join()
+                .unwrap_or_else(|_| Err(PrError::GhFailed("search thread panicked".to_string())));
+            match (authored, review) {
+                (Ok(a), Ok(r)) => Ok(dedup_prs(a, r)),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            }
+        });
         let _ = tx.send(combined);
     });
     rx
@@ -346,6 +364,29 @@ pub enum Category {
     Drafts,
     /// Not yet enriched, or enrichment failed.
     Unknown,
+}
+
+impl Category {
+    /// Display order for both the TUI and `gx pr list`.
+    pub const ALL: [Category; 6] = [
+        Category::NeedsYourReview,
+        Category::WaitingForReview,
+        Category::ReadyToMerge,
+        Category::ChangesRequested,
+        Category::Drafts,
+        Category::Unknown,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Category::NeedsYourReview => "Needs your review",
+            Category::WaitingForReview => "Waiting for review",
+            Category::ReadyToMerge => "Ready to merge",
+            Category::ChangesRequested => "Changes requested",
+            Category::Drafts => "Drafts",
+            Category::Unknown => "Loading status",
+        }
+    }
 }
 
 /// Pure categorization per the plan's KTD3 decision tree. Review-requested PRs
@@ -447,34 +488,16 @@ pub fn spawn_enrichment(
 /// ride along here because `gh search prs` cannot return them (KTD1).
 pub fn enrich_one(owner: &str, repo: &str, number: u64) -> Result<EnrichedStatus, PrError> {
     let slug = format!("{owner}/{repo}");
-
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &slug,
-            "--json",
-            "reviewDecision,mergeStateStatus,statusCheckRollup,reviewRequests,latestReviews,headRefName,isCrossRepository",
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => PrError::GhNotFound,
-            _ => PrError::GhFailed(e.to_string()),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(PrError::GhFailed(if stderr.is_empty() {
-            format!("gh pr view {slug}#{number} failed")
-        } else {
-            stderr
-        }));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let num = number.to_string();
+    let stdout = gh_capture(&[
+        "pr",
+        "view",
+        &num,
+        "--repo",
+        &slug,
+        "--json",
+        "reviewDecision,mergeStateStatus,statusCheckRollup,reviewRequests,latestReviews,headRefName,isCrossRepository",
+    ])?;
     parse_pr_view(&stdout)
 }
 

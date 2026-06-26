@@ -7,7 +7,7 @@
 //! [`is_bot`], [`suggest`], [`urlencode`]) are unit-tested without touching the
 //! network; the `gh`-driven gatherers wrap them.
 
-use super::pr_search::PrError;
+use super::pr_search::{self, PrError};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
@@ -190,6 +190,7 @@ pub fn suggest(
             || footprint
                 .already_requested
                 .iter()
+                .chain(footprint.already_reviewed.iter())
                 .any(|r| r.eq_ignore_ascii_case(handle))
     };
 
@@ -344,33 +345,17 @@ fn parse_footprint(json: &str) -> Result<PrFootprint, PrError> {
 /// Fetch the PR footprint via `gh pr view`.
 pub fn gather(owner: &str, repo: &str, number: u64) -> Result<PrFootprint, PrError> {
     let slug = format!("{owner}/{repo}");
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &slug,
-            "--json",
-            "author,files,reviewRequests,reviews",
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => PrError::GhNotFound,
-            _ => PrError::GhFailed(e.to_string()),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(PrError::GhFailed(if stderr.is_empty() {
-            format!("gh pr view {slug}#{number} failed")
-        } else {
-            stderr
-        }));
-    }
-
-    parse_footprint(&String::from_utf8_lossy(&output.stdout))
+    let num = number.to_string();
+    let stdout = pr_search::gh_capture(&[
+        "pr",
+        "view",
+        &num,
+        "--repo",
+        &slug,
+        "--json",
+        "author,files,reviewRequests,reviews",
+    ])?;
+    parse_footprint(&stdout)
 }
 
 fn fetch_codeowners(owner: &str, repo: &str) -> Option<String> {
@@ -447,11 +432,15 @@ fn tally_history(owner: &str, repo: &str, files: &[String]) -> HashMap<String, u
     scores
 }
 
-/// Full deterministic recommendation: gather footprint, resolve CODEOWNERS for
-/// the changed files, tally commit history, and rank.
-pub fn recommend(owner: &str, repo: &str, number: u64) -> Result<Recommendations, PrError> {
-    let footprint = gather(owner, repo, number)?;
-
+/// Deterministic recommendation from an already-gathered footprint: resolve
+/// CODEOWNERS for the changed files, tally commit history, and rank. Split out so
+/// a caller that needs the footprint too (e.g. for an AI-fallback prompt) does
+/// not pay a second `gh pr view`.
+pub fn recommend_from_footprint(
+    owner: &str,
+    repo: &str,
+    footprint: &PrFootprint,
+) -> Recommendations {
     let codeowner_owners = match fetch_codeowners(owner, repo) {
         Some(text) => {
             let rules = parse_codeowners(&text);
@@ -469,7 +458,7 @@ pub fn recommend(owner: &str, repo: &str, number: u64) -> Result<Recommendations
     };
 
     let history = tally_history(owner, repo, &footprint.files);
-    Ok(suggest(&footprint, &codeowner_owners, &history))
+    suggest(footprint, &codeowner_owners, &history)
 }
 
 #[cfg(test)]
@@ -581,6 +570,21 @@ mod tests {
         history.insert("carol".to_string(), 10);
         let rec = suggest(&fp, &[], &history);
         assert!(rec.suggestions.iter().all(|s| s.handle != "bob"));
+    }
+
+    #[test]
+    fn test_suggest_excludes_already_reviewed() {
+        let fp = PrFootprint {
+            author: "author".to_string(),
+            files: vec![],
+            already_requested: vec![],
+            already_reviewed: vec!["dave".to_string()],
+        };
+        let mut history = HashMap::new();
+        history.insert("dave".to_string(), 50);
+        history.insert("erin".to_string(), 10);
+        let rec = suggest(&fp, &[], &history);
+        assert!(rec.suggestions.iter().all(|s| s.handle != "dave"));
     }
 
     #[test]

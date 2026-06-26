@@ -2,8 +2,7 @@
 //! explicit `--repo owner/repo` taken from the PR so a mutation can never target
 //! the ambient working-directory repo.
 
-use super::pr_search::PrError;
-use std::process::Command;
+use super::pr_search::{self, PrError};
 use std::str::FromStr;
 
 /// How a PR should be merged.
@@ -72,25 +71,8 @@ fn ready_args(owner: &str, repo: &str, number: u64) -> Vec<String> {
 }
 
 fn run_gh(args: Vec<String>) -> Result<(), PrError> {
-    let output = Command::new("gh")
-        .args(&args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => PrError::GhNotFound,
-            _ => PrError::GhFailed(e.to_string()),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(PrError::GhFailed(if stderr.is_empty() {
-            "gh exited with an error".to_string()
-        } else {
-            stderr
-        }));
-    }
-
-    Ok(())
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    pr_search::gh_capture(&arg_refs).map(|_| ())
 }
 
 /// Merge the PR with the given method (`gh pr merge --<method>`).

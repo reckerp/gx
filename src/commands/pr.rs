@@ -42,18 +42,10 @@ pub enum PrCommandError {
     Ai(String),
 }
 
-const LIST_CATEGORIES: [(Category, &str); 6] = [
-    (Category::NeedsYourReview, "Needs your review"),
-    (Category::WaitingForReview, "Waiting for review"),
-    (Category::ReadyToMerge, "Ready to merge"),
-    (Category::ChangesRequested, "Changes requested"),
-    (Category::Drafts, "Drafts"),
-    (Category::Unknown, "Status unknown"),
-];
-
-/// Build the scope cycle and the default index. The default is the current repo
-/// when inside one, otherwise global.
-fn build_scopes(cfg: &Config) -> (Vec<Scope>, usize) {
+/// Build the scope cycle, its default index, and the current repo (if any). The
+/// default scope is the current repo when inside one (index 0), otherwise global
+/// (always pushed last). Returns the current repo so callers don't re-resolve it.
+fn build_scopes(cfg: &Config) -> (Vec<Scope>, usize, Option<(String, String)>) {
     let current = github::origin_owner_repo().ok().flatten();
     let mut scopes = Vec::new();
     if let Some((owner, repo)) = &current {
@@ -67,22 +59,19 @@ fn build_scopes(cfg: &Config) -> (Vec<Scope>, usize) {
     }
     scopes.push(Scope::Global);
 
+    // Global is always last, so its index is the final slot.
     let default_index = if current.is_some() {
         0
     } else {
-        scopes
-            .iter()
-            .position(|s| matches!(s, Scope::Global))
-            .unwrap_or(0)
+        scopes.len() - 1
     };
-    (scopes, default_index)
+    (scopes, default_index, current)
 }
 
 /// Interactive dashboard (default `gx pr`).
 pub fn run_interactive() -> Result<()> {
     let cfg = config::load()?;
-    let (scopes, default_index) = build_scopes(&cfg);
-    let launch_repo = github::origin_owner_repo().ok().flatten();
+    let (scopes, default_index, launch_repo) = build_scopes(&cfg);
     let merge_method = MergeMethod::from_str(&cfg.pr.merge_method).unwrap_or_default();
     let agent = ReviewerAgent {
         agent: cfg.ai.get_agent().ok(),
@@ -199,7 +188,7 @@ fn current_login() -> Option<String> {
 /// Non-interactive grouped listing (`gx pr list`), for non-TTY / piping.
 pub fn run_list() -> Result<()> {
     let cfg = config::load()?;
-    let (scopes, default_index) = build_scopes(&cfg);
+    let (scopes, default_index, _) = build_scopes(&cfg);
     let scope = scopes
         .into_iter()
         .nth(default_index)
@@ -231,7 +220,7 @@ fn print_grouped(prs: &[DashboardPr], scope: &Scope) {
         return;
     }
 
-    for (category, title) in LIST_CATEGORIES {
+    for category in Category::ALL {
         let mut in_cat: Vec<&DashboardPr> = prs
             .iter()
             .filter(|p| pr_search::categorize(p) == category)
@@ -241,7 +230,7 @@ fn print_grouped(prs: &[DashboardPr], scope: &Scope) {
         }
         in_cat.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-        println!("## {title}");
+        println!("## {}", category.title());
         let mut current_repo = String::new();
         for pr in in_cat {
             let repo = format!("{}/{}", pr.owner, pr.repo);
