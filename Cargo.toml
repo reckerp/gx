@@ -2,7 +2,7 @@
 name = "gx"
 description = "GX is a smart git CLI"
 homepage = "https://github.com/reckerp/gx"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 repository = "https://github.com/reckerp/gx"
 
