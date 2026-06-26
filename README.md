@@ -51,11 +51,18 @@ Switch to a branch, commit, or tag.
 gx checkout <query>
 gx co <query>
 gx switch <query>
+
+# GitHub references resolve to a branch in the current repo, then check it out:
+gx checkout https://github.com/<owner>/<repo>/pull/13   # PR -> its head branch
+gx checkout https://github.com/<owner>/<repo>/tree/<branch>
+gx checkout '#13'                                        # shorthand for a PR (quote it)
 ```
 
 **Arguments:**
 
 - `query` (optional): Branch/commit/tag to checkout (supports fuzzy matching)
+
+**GitHub references:** in place of a query you can pass a GitHub pull-request URL, a branch (`/tree/...`) URL, or the `#<number>` PR shorthand. gx verifies the reference belongs to this repository's `origin` remote (erroring otherwise), resolves pull requests to their head branch via the GitHub CLI (`gh`), and checks it out. Pull requests opened from a fork are not supported. This also works for `gx workspace new` (the workspace is named after the resolved branch) and `gx workspace go`.
 
 ### Status
 
@@ -177,9 +184,12 @@ gx workspace new <name> -b <branch> # Check out an existing/specific branch
 # branch (e.g. origin/main).
 # Names may contain '/' (e.g. feat/expose-rationale); the branch keeps the
 # '/' while the workspace directory uses '-' (feat-expose-rationale).
+gx workspace new <github-url> # Resolve a PR/branch URL (or '#13') to a branch
+                              # and create a workspace named after that branch
 gx workspace new <name> --no-setup # Skip copying setup files and setup script
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)
+gx workspace go <github-url>       # Switch to the workspace on a PR/branch's branch
 gx workspace list          # List all workspaces
 gx workspace update [query]        # Fetch origin and rebase the workspace's branch
                                    # onto origin's default branch (current workspace

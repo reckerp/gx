@@ -97,6 +97,24 @@ pub fn run_new(
     branch: Option<String>,
     no_setup: bool,
 ) -> Result<()> {
+    // A GitHub pull-request/branch URL (or '#123') resolves to a branch; the
+    // workspace is named after that branch.
+    let (name, branch) = match git::github::parse_ref(&name) {
+        Some(gh_ref) => {
+            let resolved = git::github::resolve_branch(&gh_ref)?;
+            if let Some(explicit) = &branch
+                && explicit != &resolved
+            {
+                eprintln!(
+                    "warning: ignoring --branch '{}'; using '{}' from the GitHub reference",
+                    explicit, resolved
+                );
+            }
+            (resolved.clone(), Some(resolved))
+        }
+        None => (name, branch),
+    };
+
     validate_name(&name)?;
 
     // Branch names may contain '/' (e.g. 'feat/expose-rationale'), but the
@@ -219,8 +237,16 @@ pub fn run_go(query: Option<String>) -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
 
     let target = match query {
-        Some(q) => fuzzy_match_worktree(&q, &worktrees)
-            .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?,
+        Some(q) => {
+            // A GitHub pull-request/branch URL (or '#123') resolves to a branch;
+            // switch to the workspace checked out on it.
+            let q = match git::github::parse_ref(&q) {
+                Some(gh_ref) => git::github::resolve_branch(&gh_ref)?,
+                None => q,
+            };
+            fuzzy_match_worktree(&q, &worktrees)
+                .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?
+        }
         None => {
             let Some(action) = pick_workspace(&worktrees)? else {
                 eprintln!("Cancelled");

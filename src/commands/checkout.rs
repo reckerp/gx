@@ -1,4 +1,4 @@
-use crate::git::{GitError, branch, commit, fetch};
+use crate::git::{GitError, branch, commit, fetch, github};
 use crate::ui;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use miette::{Diagnostic, Result};
@@ -33,6 +33,18 @@ pub fn run(create_branch: Option<String>, query: Option<String>) -> Result<()> {
 
         branch::checkout_branch(&new_branch_name)?;
         println!("Switched to a new branch '{}'", new_branch_name);
+        return Ok(());
+    }
+
+    // A GitHub pull-request/branch URL (or '#123') resolves to a branch in the
+    // current repo, which we then check out directly.
+    if let Some(gh_ref) = query.as_deref().and_then(github::parse_ref) {
+        let branch_name = github::resolve_branch(&gh_ref)?;
+        // The branch may only exist on origin (e.g. a PR branch); refresh its
+        // remote-tracking ref so 'git checkout' can create a local copy.
+        fetch::fetch_remote("origin").ok();
+        branch::checkout_branch(&branch_name)?;
+        println!("Switched to branch '{}'", branch_name);
         return Ok(());
     }
 

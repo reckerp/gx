@@ -2,6 +2,7 @@ pub mod branch;
 pub mod commit;
 pub mod fetch;
 pub mod git_exec;
+pub mod github;
 pub mod log;
 pub mod pull_request;
 pub mod push;
