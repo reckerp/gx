@@ -40,6 +40,7 @@ cargo run -- <arguments>
 | `stash`    | `st`           | Stash changes                       |
 | `log`      | `l`            | View commit history                 |
 | `workspace`| `ws`           | Manage workspaces (git worktrees)   |
+| `pr`       | `prs`, `pullrequest`, `pullrequests` | Dashboard of your open pull requests|
 | `onboarding`| `onboard`    | Configure repo-specific setup       |
 | `setup`    | -              | Generate shell aliases from config  |
 
@@ -209,6 +210,49 @@ gx workspace setup         # Re-run setup: copy files, then run setup script
 
 **Setup files:** files like `.env` are usually gitignored, so a fresh worktree doesn't have them. When creating a workspace, gx copies the files configured in `workspace.copy_files` and the current repo's onboarding config from the main worktree into the new one (missing files are skipped), then runs the repo-specific setup script when one is configured. The setup script runs from the workspace root. If it fails, gx warns and still switches into the workspace. See [Workspace Configuration](#workspace-configuration) and [Repo Onboarding](#repo-onboarding).
 
+### Pull Requests
+
+An interactive dashboard of your open pull requests, grouped by review **state**
+and by **repository**, with inline quick actions. Requires the GitHub CLI (`gh`)
+installed and authenticated (`gh auth login`).
+
+```bash
+gx pr                      # Interactive PR dashboard (TUI)
+gx prs                     # Same (aliases: pullrequest, pullrequests)
+gx pr list                 # Non-interactive grouped listing (for non-TTY / piping)
+```
+
+The dashboard shows both PRs **you authored** and PRs where **review is requested
+of you** (a "Needs your review" section), categorized into: Needs your review,
+Waiting for review, Ready to merge, Changes requested, Drafts. PR status (review
+decision, merge blockers, check rollup, requested reviewers) streams in the
+background so the list renders immediately and resolves as `gh pr view` lands.
+
+**Scope** defaults to the current repository when you run it inside one,
+otherwise to all repositories `gh` can see. Press `ctrl+s` to cycle scope between
+the current repo, your configured orgs (see configuration), and global.
+
+**Quick actions** on the highlighted PR:
+
+- `enter` / `ctrl+o` — open in your browser
+- `ctrl+y` — copy the PR URL
+- `ctrl+g` — merge (with a confirmation showing the target and method)
+- `ctrl+d` — mark a draft ready for review
+- `ctrl+v` — suggest reviewers (deterministic from CODEOWNERS + commit history,
+  falling back to your configured AI agent when the signal is thin)
+- `ctrl+w` — open the PR's branch in a workspace
+- `ctrl+t` — troubleshoot: open the PR in a workspace and launch your AI agent to
+  investigate
+- `ctrl+r` refresh, `ctrl+s` switch scope, `?` help, `esc` quit
+
+`ctrl+w` and `ctrl+t` operate on local worktrees, so they are enabled only for
+PRs in the repository you launched `gx` from; PRs in other repositories are
+marked with `⧉` and those actions are disabled. Fork PRs cannot be opened in a
+workspace. The troubleshoot action treats the PR's branch contents as untrusted
+and asks for confirmation before launching the agent against a PR you did not
+author. Like `gx workspace`, the workspace actions rely on the `gx setup` shell
+wrapper to `cd` you into the workspace.
+
 ### Repo Onboarding
 
 Configure setup that belongs to the current repository:
@@ -283,6 +327,30 @@ Example with more setup files:
 ```toml
 [workspace]
 copy_files = [".env*", "**/.env.local", "config/local.toml", ".vscode"]
+```
+
+### PR Dashboard Configuration
+
+```toml
+[pr]
+# Orgs offered in the dashboard's "org" scope (ctrl+s cycles through scopes).
+# Each entry becomes a `gh search --owner <org>` qualifier. Empty by default,
+# which omits the org scope from the cycle.
+orgs = []
+
+# Default merge method used by the merge action: "squash", "merge", or "rebase".
+merge_method = "squash"
+
+# Whether reviewer suggestion falls back to the configured AI agent when the
+# deterministic (CODEOWNERS + commit history) signal is thin.
+reviewer_ai_fallback = true
+```
+
+Example scoping the org filter to your org:
+
+```toml
+[pr]
+orgs = ["dash0hq"]
 ```
 
 ## License

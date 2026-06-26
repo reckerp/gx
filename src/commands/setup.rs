@@ -1,13 +1,14 @@
 use crate::config;
 use miette::Result;
 
-/// Shell wrapper that lets `gx workspace go` change the parent shell's
-/// directory: workspace commands print a target path on stdout (all UI is
-/// rendered on stderr), the wrapper captures it and cd's into it.
+/// Shell wrapper that lets `gx workspace go` (and `gx pr`'s open-in-workspace /
+/// troubleshoot actions) change the parent shell's directory: those commands
+/// print a target path on stdout (all UI is rendered on stderr), the wrapper
+/// captures it and cd's into it.
 const WORKSPACE_SHELL_WRAPPER: &str = r#"# Workspace cd integration
 gx() {
     case "$1" in
-        workspace|ws)
+        workspace|ws|pr|prs|pullrequest|pullrequests)
             local __gx_out
             __gx_out="$(command gx "$@")" || return $?
             if [ -n "$__gx_out" ] && [ -d "$__gx_out" ]; then

@@ -2,6 +2,7 @@ pub mod branch_picker;
 pub mod confirm;
 pub mod file_picker;
 pub mod log_viewer;
+pub mod pr_picker;
 pub mod setup_file_picker;
 pub mod stash_picker;
 pub mod status;

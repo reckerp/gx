@@ -115,11 +115,38 @@ pub fn run_new(
         None => (name, branch),
     };
 
-    validate_name(&name)?;
+    let path = create_workspace(&name, base, branch, no_setup)?;
+    print_go_path(&path);
+    Ok(())
+}
+
+/// Return the path of the workspace whose checked-out branch is `branch`,
+/// creating one if none exists. Used by the PR dashboard's open-in-workspace and
+/// troubleshoot actions. No stdout side effects, so the caller controls the cd.
+pub fn ensure_workspace_for_branch(branch: &str) -> Result<PathBuf> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    if let Some(existing) = worktrees
+        .iter()
+        .find(|w| w.branch.as_deref() == Some(branch))
+    {
+        return Ok(existing.path.clone());
+    }
+    create_workspace(branch, None, None, false)
+}
+
+/// Create a workspace and return its canonical path, with no stdout side
+/// effects. Shared core of [`run_new`] and [`ensure_workspace_for_branch`].
+fn create_workspace(
+    name: &str,
+    base: Option<String>,
+    branch: Option<String>,
+    no_setup: bool,
+) -> Result<PathBuf> {
+    validate_name(name)?;
 
     // Branch names may contain '/' (e.g. 'feat/expose-rationale'), but the
     // workspace directory must be a single path component.
-    let dir_name = git::worktree::flatten_slashes(&name);
+    let dir_name = git::worktree::flatten_slashes(name);
 
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
     if let Some(existing) = worktrees.iter().find(|w| w.name == dir_name) {
@@ -139,7 +166,7 @@ pub fn run_new(
         return Err(WorkspaceError::AlreadyExists(dir_name, path).into());
     }
 
-    let branch_name = branch.unwrap_or_else(|| name.clone());
+    let branch_name = branch.unwrap_or_else(|| name.to_string());
     let branch_exists_locally =
         git::worktree::branch_exists(&branch_name).map_err(WorkspaceError::GitError)?;
 
@@ -227,8 +254,7 @@ pub fn run_new(
         print_setup_report(&report, "  ", &cfg.workspace.copy_files);
     }
 
-    print_go_path(&path);
-    Ok(())
+    Ok(path)
 }
 
 /// Resolve a workspace by query (or interactively) and print its path to
@@ -854,8 +880,8 @@ fn remove_prompt(worktrees_to_remove: &[Worktree], delete_branches: bool) -> Str
 }
 
 /// Print the path the shell wrapper should cd into. This is the only thing
-/// workspace commands write to stdout.
-fn print_go_path(path: &Path) {
+/// workspace commands (and the PR dashboard's workspace actions) write to stdout.
+pub(crate) fn print_go_path(path: &Path) {
     use std::io::IsTerminal;
 
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());

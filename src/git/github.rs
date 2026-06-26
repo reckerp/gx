@@ -185,7 +185,7 @@ fn ensure_same_repo(origin: &(String, String), owner: &str, repo: &str) -> Resul
 
 /// Owner/repo of the `origin` remote, or `None` when there is no `origin`
 /// remote pointing at github.com.
-fn origin_owner_repo() -> Result<Option<(String, String)>, GitHubError> {
+pub(crate) fn origin_owner_repo() -> Result<Option<(String, String)>, GitHubError> {
     let repo = get_repo()?;
     let Ok(remote) = repo.find_remote("origin") else {
         return Ok(None);
@@ -195,7 +195,7 @@ fn origin_owner_repo() -> Result<Option<(String, String)>, GitHubError> {
 
 /// Extract `(owner, repo)` from a github.com remote URL, supporting the
 /// scp-like (`git@github.com:owner/repo.git`), HTTPS, and SSH URL forms.
-fn parse_owner_repo(url: &str) -> Option<(String, String)> {
+pub(crate) fn parse_owner_repo(url: &str) -> Option<(String, String)> {
     let idx = url.find("github.com")?;
     let after = &url[idx + "github.com".len()..];
     // After the host comes ':owner/repo.git' (scp-like) or '/owner/repo.git'.

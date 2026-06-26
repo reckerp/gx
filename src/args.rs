@@ -90,6 +90,13 @@ pub enum Commands {
         action: Option<WorkspaceCommands>,
     },
 
+    /// Dashboard of your open pull requests
+    #[command(aliases = ["prs", "pullrequest", "pullrequests"])]
+    Pr {
+        #[command(subcommand)]
+        action: Option<PrCommands>,
+    },
+
     /// Configure repo-specific workspace setup
     #[command(alias = "onboard")]
     Onboarding,
@@ -153,6 +160,12 @@ pub enum StashCommands {
         /// Stash reference (e.g., 0 or stash@{0})
         stash: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum PrCommands {
+    /// Print open PRs grouped by state (non-interactive)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -274,6 +287,10 @@ impl Commands {
                     delete_branch,
                 }) => commands::workspace::run_remove(query, force, delete_branch),
                 Some(WorkspaceCommands::Setup) => commands::workspace::run_setup(),
+            },
+            Commands::Pr { action } => match action {
+                None => commands::pr::run_interactive(),
+                Some(PrCommands::List) => commands::pr::run_list(),
             },
             Commands::Setup => commands::setup::run(),
         }
