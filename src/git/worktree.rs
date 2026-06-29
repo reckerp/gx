@@ -298,6 +298,120 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
     Ok(())
 }
 
+/// Move the worktree at `path` to `new_path`. Runs git from `from` (the main
+/// worktree) and prefers `git worktree move` over a manual filesystem move so
+/// Git's administrative files (`.git` pointer, gitdir link) stay consistent.
+pub fn move_worktree(from: &Path, path: &Path, new_path: &Path) -> Result<(), GitError> {
+    git_exec::exec(
+        move_worktree_args(from, path, new_path),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Lock the worktree at `path` so cleanup and `git worktree prune` skip it.
+/// Runs git from `from` (the main worktree). An optional `reason` is recorded
+/// by git and shown in `git worktree list --verbose`.
+pub fn lock(from: &Path, path: &Path, reason: Option<&str>) -> Result<(), GitError> {
+    git_exec::exec(
+        lock_args(from, path, reason),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Clear the lock on the worktree at `path`. Runs git from `from` (the main
+/// worktree).
+pub fn unlock(from: &Path, path: &Path) -> Result<(), GitError> {
+    git_exec::exec(
+        unlock_args(from, path),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Repair worktree administrative files (the two-way links between the main
+/// repository and its linked worktrees). With no `paths`, git repairs every
+/// worktree; otherwise it repairs only the listed ones. Mostly for recovery
+/// after a worktree directory or the main repo has been moved. Runs git from
+/// `from` (the main worktree).
+pub fn repair(from: &Path, paths: &[PathBuf]) -> Result<(), GitError> {
+    git_exec::exec(
+        repair_args(from, paths),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+// The arg builders are split out as pure functions so they can be unit tested
+// without spawning git; `--` always ends option parsing so paths beginning with
+// '-' are treated as paths, never flags.
+
+fn move_worktree_args(from: &Path, path: &Path, new_path: &Path) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "move".to_string(),
+        "--".to_string(),
+        path.display().to_string(),
+        new_path.display().to_string(),
+    ]
+}
+
+fn lock_args(from: &Path, path: &Path, reason: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "lock".to_string(),
+    ];
+    if let Some(reason) = reason {
+        args.push("--reason".to_string());
+        args.push(reason.to_string());
+    }
+    args.push("--".to_string());
+    args.push(path.display().to_string());
+    args
+}
+
+fn unlock_args(from: &Path, path: &Path) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "unlock".to_string(),
+        "--".to_string(),
+        path.display().to_string(),
+    ]
+}
+
+fn repair_args(from: &Path, paths: &[PathBuf]) -> Vec<String> {
+    let mut args = vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "repair".to_string(),
+    ];
+    if !paths.is_empty() {
+        args.push("--".to_string());
+        args.extend(paths.iter().map(|p| p.display().to_string()));
+    }
+    args
+}
+
 /// Start the local status lookup on a background thread so the workspace picker
 /// can render before expensive `git status` scans finish.
 pub fn spawn_summary_lookup(worktrees: &[Worktree]) -> SummaryLookup {
@@ -833,5 +947,80 @@ mod tests {
         let w = worktree("custom-dir", Some("fix/null-check"));
         assert!(w.match_score(&matcher, "fix-null").is_some());
         assert!(w.match_score(&matcher, "fix/null").is_some());
+    }
+
+    #[test]
+    fn test_move_worktree_args() {
+        let args = move_worktree_args(
+            Path::new("/repo"),
+            Path::new("/ws/feature"),
+            Path::new("/ws/moved"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-C",
+                "/repo",
+                "worktree",
+                "move",
+                "--",
+                "/ws/feature",
+                "/ws/moved"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lock_args_with_and_without_reason() {
+        let with_reason = lock_args(
+            Path::new("/repo"),
+            Path::new("/ws/feature"),
+            Some("long review"),
+        );
+        assert_eq!(
+            with_reason,
+            vec![
+                "-C",
+                "/repo",
+                "worktree",
+                "lock",
+                "--reason",
+                "long review",
+                "--",
+                "/ws/feature"
+            ]
+        );
+
+        let without_reason = lock_args(Path::new("/repo"), Path::new("/ws/feature"), None);
+        assert_eq!(
+            without_reason,
+            vec!["-C", "/repo", "worktree", "lock", "--", "/ws/feature"]
+        );
+    }
+
+    #[test]
+    fn test_unlock_args() {
+        let args = unlock_args(Path::new("/repo"), Path::new("/ws/feature"));
+        assert_eq!(
+            args,
+            vec!["-C", "/repo", "worktree", "unlock", "--", "/ws/feature"]
+        );
+    }
+
+    #[test]
+    fn test_repair_args_forwards_paths() {
+        // No paths: git repairs every worktree, so no `--` / path args.
+        let all = repair_args(Path::new("/repo"), &[]);
+        assert_eq!(all, vec!["-C", "/repo", "worktree", "repair"]);
+
+        // Targeted: paths are forwarded after `--`.
+        let targeted = repair_args(
+            Path::new("/repo"),
+            &[PathBuf::from("/ws/a"), PathBuf::from("/ws/b")],
+        );
+        assert_eq!(
+            targeted,
+            vec!["-C", "/repo", "worktree", "repair", "--", "/ws/a", "/ws/b"]
+        );
     }
 }
