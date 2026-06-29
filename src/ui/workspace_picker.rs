@@ -1,6 +1,9 @@
 use super::{TermStderr, adjust_scroll, render_help_bar};
 use crate::git::pull_request::{PullRequestLookup, PullRequestState, PullRequestStatus};
-use crate::git::worktree::{Worktree, WorktreeSummary, apply_pull_requests};
+use crate::git::worktree::{
+    SummaryLookup, Worktree, WorktreeSummary, apply_local_summaries, apply_pull_requests,
+    pending_summaries,
+};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::IntoDiagnostic;
@@ -20,6 +23,7 @@ pub enum WorkspaceAction {
         worktrees: Vec<Worktree>,
         delete_branches: bool,
         confirmed: bool,
+        dirty_paths: HashSet<PathBuf>,
     },
     /// Update selected workspaces
     Update(Vec<Worktree>),
@@ -203,6 +207,11 @@ fn render_summary_badges(summary: &WorktreeSummary) -> Vec<Span<'static>> {
             " status?".to_string(),
             Style::default().fg(Color::DarkGray),
         ));
+    } else if !summary.status_loaded {
+        badges.push(Span::styled(
+            " status...".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     badges
@@ -272,6 +281,8 @@ fn render_info_pane<'a>(
             lines.push("Status:".to_string());
             if summary.status_error {
                 lines.push("  Could not read workspace status".to_string());
+            } else if !summary.status_loaded {
+                lines.push("  Loading...".to_string());
             } else if !summary.has_changes() && !summary.has_unpushed_commits() {
                 lines.push("  Clean".to_string());
             } else {
@@ -382,6 +393,21 @@ fn copy_pr_urls(urls: &[String]) -> String {
         Ok(()) => format!("Copied {} PR URLs to clipboard", urls.len()),
         Err(_) => "Could not access clipboard".to_string(),
     }
+}
+
+fn dirty_paths_for_targets(
+    targets: &[Worktree],
+    summaries: &HashMap<PathBuf, WorktreeSummary>,
+) -> HashSet<PathBuf> {
+    targets
+        .iter()
+        .filter(|worktree| {
+            summaries.get(&worktree.path).is_some_and(|summary| {
+                summary.status_loaded && !summary.status_error && summary.has_changes()
+            })
+        })
+        .map(|worktree| worktree.path.clone())
+        .collect()
 }
 
 fn toggle_selection(worktree: Option<&Worktree>, selected_paths: &mut HashSet<PathBuf>) {
@@ -534,9 +560,10 @@ fn render_remove_confirmation<'a>(
 pub fn run(
     terminal: &mut TermStderr,
     worktrees: &[Worktree],
-    mut summaries: HashMap<PathBuf, WorktreeSummary>,
+    summary_lookup: SummaryLookup,
     pull_requests: Receiver<PullRequestLookup>,
 ) -> miette::Result<Option<WorkspaceAction>> {
+    let mut summaries = pending_summaries(worktrees);
     let mut query = String::new();
     let mut selected_index = 0;
     let mut scroll_offset = 0;
@@ -546,8 +573,12 @@ pub fn run(
     let mut status_message: Option<String> = None;
 
     loop {
-        // PR status is fetched off-thread; merge it in as soon as it lands so
-        // badges "spawn in" without ever blocking the render loop.
+        if let Ok(lookup) = summary_lookup.try_recv() {
+            apply_local_summaries(&mut summaries, lookup);
+        }
+
+        // PR status is fetched off-thread; merge it in as soon as it lands
+        // without blocking the render loop.
         if let Ok(lookup) = pull_requests.try_recv() {
             apply_pull_requests(&mut summaries, worktrees, lookup);
         }
@@ -806,10 +837,12 @@ pub fn run(
                         mode = Mode::List;
                     }
                     (KeyCode::Enter, _) | (KeyCode::Char('y'), _) => {
+                        let dirty_paths = dirty_paths_for_targets(&worktrees, &summaries);
                         return Ok(Some(WorkspaceAction::Remove {
                             worktrees,
                             delete_branches,
                             confirmed: true,
+                            dirty_paths,
                         }));
                     }
                     _ => {}
@@ -939,6 +972,52 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_dirty_paths_for_targets_uses_only_loaded_successful_status() {
+        let dirty = worktree("dirty", false);
+        let clean = worktree("clean", false);
+        let pending = worktree("pending", false);
+        let errored = worktree("errored", false);
+        let mut summaries = HashMap::new();
+        summaries.insert(
+            dirty.path.clone(),
+            WorktreeSummary {
+                tracked_changes: 1,
+                status_loaded: true,
+                ..Default::default()
+            },
+        );
+        summaries.insert(
+            clean.path.clone(),
+            WorktreeSummary {
+                status_loaded: true,
+                ..Default::default()
+            },
+        );
+        summaries.insert(
+            pending.path.clone(),
+            WorktreeSummary {
+                tracked_changes: 1,
+                status_loaded: false,
+                ..Default::default()
+            },
+        );
+        summaries.insert(
+            errored.path.clone(),
+            WorktreeSummary {
+                tracked_changes: 1,
+                status_loaded: true,
+                status_error: true,
+                ..Default::default()
+            },
+        );
+
+        let dirty_paths =
+            dirty_paths_for_targets(&[dirty.clone(), clean, pending, errored], &summaries);
+
+        assert_eq!(dirty_paths, HashSet::from([dirty.path]));
     }
 
     #[test]

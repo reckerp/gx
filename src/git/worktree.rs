@@ -4,8 +4,12 @@ use crate::git::pull_request::{PullRequestLookup, PullRequestStatus};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+
+const MAX_SUMMARY_WORKERS: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct Worktree {
@@ -31,7 +35,25 @@ pub struct WorktreeSummary {
     pub ahead: Option<usize>,
     pub behind: Option<usize>,
     pub pull_request: PullRequestStatus,
+    pub status_loaded: bool,
     pub status_error: bool,
+}
+
+pub struct SummaryLookup {
+    rx: Receiver<HashMap<PathBuf, WorktreeSummary>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl SummaryLookup {
+    pub fn try_recv(&self) -> Result<HashMap<PathBuf, WorktreeSummary>, TryRecvError> {
+        self.rx.try_recv()
+    }
+}
+
+impl Drop for SummaryLookup {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 impl WorktreeSummary {
@@ -41,6 +63,25 @@ impl WorktreeSummary {
 
     pub fn has_unpushed_commits(&self) -> bool {
         self.ahead.unwrap_or(0) > 0
+    }
+
+    pub fn pending_for(worktree: &Worktree) -> Self {
+        Self {
+            pull_request: if worktree.branch.is_some() {
+                PullRequestStatus::Loading
+            } else {
+                PullRequestStatus::None
+            },
+            ..Default::default()
+        }
+    }
+
+    fn status_error_for(worktree: &Worktree) -> Self {
+        Self {
+            status_loaded: true,
+            status_error: true,
+            ..Self::pending_for(worktree)
+        }
     }
 }
 
@@ -257,14 +298,44 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
     Ok(())
 }
 
+/// Start the local status lookup on a background thread so the workspace picker
+/// can render before expensive `git status` scans finish.
+pub fn spawn_summary_lookup(worktrees: &[Worktree]) -> SummaryLookup {
+    let (tx, rx) = mpsc::channel();
+    let worktrees = worktrees.to_vec();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+
+    std::thread::spawn(move || {
+        let summaries = summarize_all_interruptible(&worktrees, &worker_cancelled);
+        if !worker_cancelled.load(Ordering::Relaxed) {
+            let _ = tx.send(summaries);
+        }
+    });
+
+    SummaryLookup { rx, cancelled }
+}
+
+pub fn pending_summaries(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
+    worktrees
+        .iter()
+        .map(|worktree| {
+            (
+                worktree.path.clone(),
+                WorktreeSummary::pending_for(worktree),
+            )
+        })
+        .collect()
+}
+
 /// Compute the local (network-free) status for every worktree, in parallel.
 /// Each summary shells out to git (status + ahead/behind) against an independent
-/// working tree, so the work is I/O-bound and embarrassingly parallel; doing it
-/// serially makes opening the workspace picker scale linearly with the number of
-/// worktrees. Pull-request status is left as `Loading`; resolve it separately
-/// via [`crate::git::pull_request::spawn_lookup`] and [`apply_pull_requests`] so
-/// the caller never blocks on the network.
-pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
+/// working tree. Worker count is capped because many simultaneous filesystem
+/// scans can make disk-heavy repositories slower, not faster.
+fn summarize_all_interruptible(
+    worktrees: &[Worktree],
+    cancelled: &AtomicBool,
+) -> HashMap<PathBuf, WorktreeSummary> {
     if worktrees.is_empty() {
         return HashMap::new();
     }
@@ -276,20 +347,33 @@ pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
+        .min(MAX_SUMMARY_WORKERS)
         .min(worktrees.len());
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
                 loop {
+                    if cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(worktree) = worktrees.get(i) else {
                         break;
                     };
-                    let summary = summarize(worktree).unwrap_or_else(|_| WorktreeSummary {
-                        status_error: true,
-                        ..Default::default()
-                    });
+
+                    if cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let summary = summarize(worktree)
+                        .unwrap_or_else(|_| WorktreeSummary::status_error_for(worktree));
+
+                    if cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     results
                         .lock()
                         .unwrap()
@@ -300,6 +384,20 @@ pub fn summarize_all(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary
     });
 
     results.into_inner().unwrap().into_iter().collect()
+}
+
+/// Merge completed local status into the map used by the picker, preserving any
+/// PR lookup result that may have arrived first.
+pub fn apply_local_summaries(
+    summaries: &mut HashMap<PathBuf, WorktreeSummary>,
+    lookup: HashMap<PathBuf, WorktreeSummary>,
+) {
+    for (path, mut local_summary) in lookup {
+        if let Some(existing) = summaries.get(&path) {
+            local_summary.pull_request = existing.pull_request.clone();
+        }
+        summaries.insert(path, local_summary);
+    }
 }
 
 /// Merge a completed pull-request lookup into existing summaries. On success
@@ -364,6 +462,7 @@ pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
         } else {
             PullRequestStatus::None
         },
+        status_loaded: true,
         status_error: false,
     })
 }
@@ -595,6 +694,54 @@ mod tests {
             state: crate::git::pull_request::PullRequestState::Open,
             url: format!("https://example.com/pull/{number}"),
         }
+    }
+
+    #[test]
+    fn test_pending_summaries_seed_pr_loading_state() {
+        let branched = worktree("feature", Some("feature"));
+        let detached = worktree("detached", None);
+        let summaries = pending_summaries(&[branched.clone(), detached.clone()]);
+
+        assert_eq!(
+            summaries[&branched.path].pull_request,
+            PullRequestStatus::Loading
+        );
+        assert_eq!(
+            summaries[&detached.path].pull_request,
+            PullRequestStatus::None
+        );
+        assert!(!summaries[&branched.path].status_loaded);
+    }
+
+    #[test]
+    fn test_apply_local_summaries_preserves_pr_status() {
+        let feature = worktree("feature", Some("feature"));
+        let pr = pr_summary(7);
+        let mut summaries = HashMap::from([(
+            feature.path.clone(),
+            WorktreeSummary {
+                pull_request: PullRequestStatus::Found(pr.clone()),
+                ..Default::default()
+            },
+        )]);
+        let lookup = HashMap::from([(
+            feature.path.clone(),
+            WorktreeSummary {
+                tracked_changes: 2,
+                status_loaded: true,
+                pull_request: PullRequestStatus::None,
+                ..Default::default()
+            },
+        )]);
+
+        apply_local_summaries(&mut summaries, lookup);
+
+        assert_eq!(summaries[&feature.path].tracked_changes, 2);
+        assert!(summaries[&feature.path].status_loaded);
+        assert_eq!(
+            summaries[&feature.path].pull_request,
+            PullRequestStatus::Found(pr)
+        );
     }
 
     #[test]
