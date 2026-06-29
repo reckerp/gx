@@ -10,3 +10,4 @@ pub mod setup;
 pub mod stash;
 pub mod status;
 pub mod workspace;
+pub mod workspace_clean;
