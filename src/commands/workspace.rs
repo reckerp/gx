@@ -284,6 +284,7 @@ pub fn run_go(query: Option<String>) -> Result<()> {
                     worktrees: worktrees_to_remove,
                     delete_branches,
                     confirmed,
+                    dirty_paths,
                 } => {
                     return remove_worktrees(
                         &worktrees_to_remove,
@@ -291,6 +292,7 @@ pub fn run_go(query: Option<String>) -> Result<()> {
                         false,
                         delete_branches,
                         confirmed,
+                        &dirty_paths,
                     );
                 }
                 WorkspaceAction::Update(worktrees_to_update) => {
@@ -375,6 +377,7 @@ pub fn run_remove(query: Option<String>, force: bool, delete_branch: bool) -> Re
                     worktrees: worktrees_to_remove,
                     delete_branches,
                     confirmed,
+                    dirty_paths,
                 } => {
                     return remove_worktrees(
                         &worktrees_to_remove,
@@ -382,6 +385,7 @@ pub fn run_remove(query: Option<String>, force: bool, delete_branch: bool) -> Re
                         force,
                         delete_branches || delete_branch,
                         confirmed,
+                        &dirty_paths,
                     );
                 }
                 WorkspaceAction::Update(worktrees_to_update) => {
@@ -396,7 +400,14 @@ pub fn run_remove(query: Option<String>, force: bool, delete_branch: bool) -> Re
         }
     };
 
-    remove_worktrees(&targets, &worktrees, force, delete_branch, false)
+    remove_worktrees(
+        &targets,
+        &worktrees,
+        force,
+        delete_branch,
+        false,
+        &HashSet::new(),
+    )
 }
 
 /// Bring a workspace up to date by fetching origin and rebasing its branch
@@ -468,12 +479,14 @@ pub fn run_interactive() -> Result<()> {
             worktrees: worktrees_to_remove,
             delete_branches,
             confirmed,
+            dirty_paths,
         } => remove_worktrees(
             &worktrees_to_remove,
             &worktrees,
             false,
             delete_branches,
             confirmed,
+            &dirty_paths,
         ),
         WorkspaceAction::Update(worktrees_to_update) => {
             update_worktrees(&worktrees_to_update, None)
@@ -489,12 +502,9 @@ pub fn run_interactive() -> Result<()> {
 fn pick_workspace(worktrees: &[Worktree]) -> Result<Option<WorkspaceAction>> {
     let mut terminal = ui::terminal::setup_terminal_stderr()
         .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
-    // Kick off the network PR lookup first so it overlaps with the local
-    // (network-free) summaries; the TUI renders immediately and PR badges
-    // stream in when the lookup resolves.
+    let summary_lookup = git::worktree::spawn_summary_lookup(worktrees);
     let pull_requests = git::pull_request::spawn_lookup(worktrees);
-    let summaries = git::worktree::summarize_all(worktrees);
-    let result = ui::workspace_picker::run(&mut terminal, worktrees, summaries, pull_requests);
+    let result = ui::workspace_picker::run(&mut terminal, worktrees, summary_lookup, pull_requests);
     ui::terminal::restore_terminal_stderr(terminal)
         .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
     result
@@ -724,6 +734,7 @@ fn remove_worktrees(
     force: bool,
     delete_branches: bool,
     already_confirmed: bool,
+    known_dirty_paths: &HashSet<PathBuf>,
 ) -> Result<()> {
     let mut seen = HashSet::new();
     let mut targets: Vec<Worktree> = worktrees_to_remove
@@ -759,19 +770,27 @@ fn remove_worktrees(
     let removes_current = targets.iter().any(|w| w.is_current);
 
     for worktree in &targets {
-        match git::worktree::remove(&main_root, &worktree.path, force) {
+        eprintln!("Removing workspace '{}'...", worktree.name);
+
+        let use_force = if force {
+            true
+        } else if known_dirty_paths.contains(&worktree.path) && !worktree.is_locked {
+            if !confirm_force_remove(worktree)? {
+                return Ok(());
+            }
+            true
+        } else {
+            false
+        };
+
+        match git::worktree::remove(&main_root, &worktree.path, use_force) {
             Ok(()) => {}
             // copied setup files (e.g. .env) are untracked, so offer a force
             // removal instead of failing outright
             Err(GitError::CommandFailed(msg))
-                if !force && msg.contains("contains modified or untracked files") =>
+                if !use_force && msg.contains("contains modified or untracked files") =>
             {
-                let confirmed = ui::confirm::run_on_stderr(&format!(
-                    "Workspace '{}' has modified or untracked files. Remove anyway?",
-                    worktree.name
-                ))?;
-                if !confirmed {
-                    eprintln!("Cancelled");
+                if !confirm_force_remove(worktree)? {
                     return Ok(());
                 }
                 git::worktree::remove(&main_root, &worktree.path, true)
@@ -803,6 +822,17 @@ fn remove_worktrees(
         print_go_path(&main_root);
     }
     Ok(())
+}
+
+fn confirm_force_remove(worktree: &Worktree) -> Result<bool> {
+    let confirmed = ui::confirm::run_on_stderr(&format!(
+        "Workspace '{}' has modified or untracked files. Remove anyway?",
+        worktree.name
+    ))?;
+    if !confirmed {
+        eprintln!("Cancelled");
+    }
+    Ok(confirmed)
 }
 
 fn delete_local_branch(main_root: &Path, branch: &str) -> Result<()> {
