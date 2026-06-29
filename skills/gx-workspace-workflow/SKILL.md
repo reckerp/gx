@@ -1,6 +1,6 @@
 ---
 name: gx-workspace-workflow
-description: Use gx workspaces by default at the start of a new autonomous coding task in a git repo, even when the user does not explicitly ask for a workspace. Trigger this for new features, fixes, refactors, experiments, branch work, isolated work, concurrent tasks, and any request that mentions git worktree, worktree, or worktrees; use gx workspace commands as the preferred interface for git worktree workflows.
+description: Use gx workspaces by default at the start of a new autonomous coding task in a git repo, even when the user does not explicitly ask for a workspace. Trigger this for new features, fixes, refactors, experiments, branch work, isolated work, concurrent tasks, and any request that mentions git worktree, worktree, or worktrees; use gx workspace commands as the preferred interface for git worktree workflows. Also trigger when cleaning up, pruning, or removing stale workspaces, worktrees, or orphan branches, or when protecting or locking a workspace from cleanup.
 ---
 
 # GX Workspace Workflow
@@ -22,6 +22,13 @@ Use gx as the control plane for Git worktrees. Keep the main worktree stable, pu
 4. Create the workspace with `gx workspace new <name>` or `gx workspace new <name> <base>`. Use `-b <branch>` only when the branch already exists.
 5. Enter the printed workspace path if your shell wrapper did not change directories for you. In non-interactive shells, prefer `cd "$(gx workspace new <name>)"` or `cd "$(gx workspace go <query>)"` when running a single shell command.
 
+Useful creation flags:
+
+- `gx workspace new feat/x --from-staged [paths...]` when you have already begun work in the current workspace: it copies the staged file contents into the new workspace and leaves the source untouched, so you can split work onto its own branch.
+- `gx workspace new <name> --no-cd` when scripting and you do not want shell navigation (stdout stays empty).
+- `gx workspace new <name> --no-hooks` to skip the repo's pre/post-create hooks for one creation.
+- `gx workspace new <name> --no-fetch` when offline; gx resolves the base from local refs only.
+
 ## Resume or Switch
 
 - Use `gx workspace go [query]` to resume an existing workspace.
@@ -40,6 +47,15 @@ Use gx as the control plane for Git worktrees. Keep the main worktree stable, pu
 - Keep unrelated work out of the workspace. If unrelated local changes are present, preserve them and ask before moving or stashing them.
 - Do not remove a workspace with uncommitted changes unless the user explicitly requests it.
 - Use `gx workspace remove <name>` only after the task is committed, pushed, abandoned by request, or otherwise clearly safe to discard.
+- Lock long-running or important work with `gx workspace lock <query>` so cleanup and `git worktree prune` skip it; clear it later with `gx workspace unlock <query>`. Protect a branch from cleanup with `gx workspace protect <branch>`.
+
+## Clean Up
+
+- Prefer gx for cleanup requests instead of raw `git worktree remove`/`prune` or `git branch -d`.
+- Use `gx workspace clean` for the interactive multi-section picker (workspaces to remove plus orphan branches to delete), or `gx workspace clean --auto` to remove every workspace that passes the safety checks after one confirmation.
+- Always preview with `gx workspace clean --dry-run` (or `gx workspace prune --dry-run`) before deleting, and report what would be removed.
+- `gx workspace prune` drops stale worktree metadata and deletes safe orphan branches; add `--no-branches` to touch only metadata.
+- Cleanup never removes the main worktree, the current worktree, locked worktrees, or protected branches, and by default skips workspaces with uncommitted changes, untracked files, unpushed commits, or no upstream. Do not pass `--force` unless the user explicitly accepts discarding those changes.
 
 ## Handoff
 

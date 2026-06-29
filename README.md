@@ -244,6 +244,9 @@ gx workspace new <name> --detach   # Detached HEAD instead of a new branch
                                    # a <base> to detach at a specific commit)
 gx workspace new <name> --track    # Set the base's remote branch as the new
                                    # branch's upstream (mirrors git tracking)
+gx workspace new <name> --no-hooks # Skip the repo's pre/post-create hooks for
+                                   # this creation (see Shared Workspace
+                                   # Configuration)
 # If a branch name collides with an existing one in git's ref namespace
 # (e.g. 'foo/bar' when branch 'foo' exists), gx explains the conflict instead
 # of letting 'git worktree add' fail cryptically. If the target path is already
@@ -279,6 +282,25 @@ gx workspace lock <query> [--reason <reason>]  # Lock a workspace so cleanup and
                                                # 'git worktree prune' skip it
 gx workspace unlock <query> # Clear a workspace lock
 gx workspace repair [query] # Repair worktree admin files after a move (all if omitted)
+
+gx workspace clean         # Interactive multi-section cleanup picker: choose
+                           # workspaces to remove and orphan branches to delete
+gx workspace clean --auto  # Remove every workspace that passes the safety
+                           # checks (still asks for one final confirmation).
+                           # Also enabled by [workspace.clean] auto = true
+gx workspace clean --auto --use-threshold # In --auto mode, only consider
+                           # workspaces older than [workspace.clean]
+                           # threshold_days (default 7)
+gx workspace clean --dry-run # Show what would be removed without deleting
+gx workspace clean --force   # Bypass the dirty/untracked/unpushed checks (still
+                           # protects main, current, locked, and protected ones)
+gx workspace prune         # Prune stale worktree metadata, then delete safe
+                           # orphan branches (asks for confirmation)
+gx workspace prune --dry-run     # Show what would be pruned/deleted
+gx workspace prune --no-branches # Only prune metadata; leave branches alone
+gx workspace protect [branch]    # Protect a branch from cleanup (current branch
+                                 # if omitted); adds to [workspace] protected_branches
+gx workspace unprotect [branch]  # Remove a branch from the protected list
 ```
 
 **`setup` vs `sync`:** `gx workspace setup` applies the configured policy (copy files plus the setup script) for the current workspace. `gx workspace sync` is the manual copy tool: it copies arbitrary paths (defaulting to the configured `copy_files`) from a source workspace (defaulting to the main worktree) into a target workspace (defaulting to the current one). Directories are copied recursively, parent directories are created as needed, and missing source paths are reported without aborting the rest of the sync.
@@ -288,6 +310,8 @@ gx workspace repair [query] # Repair worktree admin files after a move (all if o
 **Changing directories:** a child process can't change your shell's directory, so `cd`-on-switch is handled by the shell wrapper emitted by `gx setup`. With `eval "$(gx setup)"` in your shell config, `gx workspace go`, `gx workspace new`, and the TUI will land you directly in the workspace. Without it, the workspace path is printed so you can `cd "$(gx workspace go <query>)"` yourself.
 
 **Setup files:** files like `.env` are usually gitignored, so a fresh worktree doesn't have them. When creating a workspace, gx copies the files configured in `workspace.copy_files` and the current repo's onboarding config from the main worktree into the new one (missing files are skipped), then runs the repo-specific setup script when one is configured. The setup script runs from the workspace root. If it fails, gx warns and still switches into the workspace. See [Workspace Configuration](#workspace-configuration) and [Repo Onboarding](#repo-onboarding).
+
+**Cleanup safety:** `gx workspace clean` and `gx workspace prune` never remove the main worktree, the current worktree, locked worktrees, or protected branches. By default they also skip workspaces with uncommitted changes, untracked files, unpushed commits, or a branch that was never pushed (no upstream). `--force` relaxes only those content checks — the structural protections always hold. Protect a branch you want to keep with `gx workspace protect <branch>` (stored in `[workspace] protected_branches`), and lock an in-progress workspace with `gx workspace lock <query>` so cleanup and `git worktree prune` skip it. Use `--dry-run` to preview either command before it deletes anything.
 
 ### Pull Requests
 
@@ -341,14 +365,19 @@ gx onboarding
 gx onboard
 ```
 
-The onboarding TUI lets you select repo files/directories to copy into each new workspace, then asks whether to define a setup script. If you choose yes, gx creates an executable `setup.sh` under `~/.config/gx/repos/<repo>/` and opens it with `$VISUAL`, `$EDITOR`, or `vi`.
+The onboarding TUI lets you select repo files/directories to copy into each new workspace, then asks **where** the configuration should be saved:
 
-Repo onboarding config is stored outside the repository under `~/.config/gx/repos/`. It is shared by all git worktrees from the same repository, matching Git's worktree behavior. The script is saved outside the repo but executed with the new workspace root as the current directory, so it can contain commands like:
+- **Shared repo config** (`.gx/workspace.toml`) is committable, so the whole team inherits the same workspace defaults. gx also writes a `.gx/.gitignore` (keeping the local override and transient state out of version control) and can optionally create a git-ignored `.gx/workspace.local.toml` for machine-specific overrides. A shared setup script is saved as `.gx/setup-workspace.sh`.
+- **Personal config** stays on this machine under `~/.config/gx/repos/<repo>/` — good for secrets and local-only scripts. It is shared by all git worktrees from the same repository, matching Git's worktree behavior, but never committed. A personal setup script is saved as `setup.sh` there.
+
+If you choose to define a setup script, gx creates it and opens it with `$VISUAL`, `$EDITOR`, or `vi`. Setup scripts are executed with the new workspace root as the current directory, so they can contain commands like:
 
 ```bash
 npm install
 npx vercel link
 ```
+
+See [Shared Workspace Configuration](#shared-workspace-configuration) for the full `.gx/workspace.toml` schema, including pre/post-create hooks.
 
 ### Setup
 
@@ -421,6 +450,19 @@ root = "~/gx/workspaces/{repo}"
 # component; "**" matches zero or more path components. Directories are
 # copied recursively, missing entries are skipped.
 copy_files = [".env"]
+
+# Branches cleanup must never remove, on top of the always-protected set
+# (the default branch, "main", "master", the current branch, and any branch
+# checked out in a worktree). Managed by `gx workspace protect`/`unprotect`.
+protected_branches = []
+
+[workspace.clean]
+# A workspace counts as "stale" once it is at least this many days old.
+# Only consulted by `gx workspace clean --auto --use-threshold`.
+threshold_days = 7
+
+# When true, a bare `gx workspace clean` behaves like `--auto`.
+auto = false
 ```
 
 Example with more setup files:
@@ -429,6 +471,33 @@ Example with more setup files:
 [workspace]
 copy_files = [".env*", "**/.env.local", "config/local.toml", ".vscode"]
 ```
+
+### Shared Workspace Configuration
+
+Beyond the global `~/.config/gx/config.toml`, a repository can ship a committable workspace policy in `.gx/workspace.toml` (created by `gx onboarding`). It is shared by every worktree of the repo and lets a team standardize how new workspaces are set up. A git-ignored `.gx/workspace.local.toml` can override it per machine.
+
+```toml
+# .gx/workspace.toml
+version = 1
+
+[workspace]
+# Repo-relative globs copied into each new workspace. Unioned with the global
+# config and personal profile copy_files (additive, not a replacement).
+copy_files = [".env.example", "config/local.example.toml"]
+
+# Setup script run after creation, resolved against the repo root.
+setup_script = ".gx/setup-workspace.sh"
+
+[workspace.hooks]
+# Commands run before the worktree is created. A non-zero exit aborts creation.
+pre_create = ["test -f package.json"]
+# Commands run after the worktree exists. A failure only warns.
+post_create = ["pnpm install"]
+```
+
+Hooks run via `sh -c` from the new workspace root and can use the `{workspace}`, `{workspace_path}`, `{main_root}`, and `{branch}` placeholders (also exported as `GX_WORKSPACE`, `GX_WORKSPACE_PATH`, `GX_MAIN_ROOT`, and `GX_BRANCH`). Skip them for a single creation with `gx workspace new <name> --no-hooks`.
+
+Configuration layers merge lowest-to-highest: built-in defaults, the global config, the personal repo profile, `.gx/workspace.toml`, then `.gx/workspace.local.toml`, with CLI flags applied last. `copy_files` is additive across layers; other fields are replaced by the highest layer that sets them.
 
 ### PR Dashboard Configuration
 
