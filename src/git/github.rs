@@ -6,9 +6,8 @@
 //! belongs to the current repository's `origin` remote; pull requests are then
 //! resolved to their head branch via the `gh` CLI.
 
-use super::{GitError, get_repo};
+use super::{GitError, gh, get_repo};
 use miette::Diagnostic;
-use std::process::Command;
 use thiserror::Error;
 
 /// A parsed GitHub reference, before it is validated against `origin` or
@@ -219,38 +218,22 @@ pub(crate) fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 fn resolve_pr_branch(owner: &str, repo: &str, number: u64) -> Result<String, GitHubError> {
     let slug = format!("{owner}/{repo}");
 
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &slug,
-            "--json",
-            "headRefName,isCrossRepository",
-            "--template",
-            "{{.headRefName}}{{\"\\t\"}}{{.isCrossRepository}}",
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => GitHubError::GhNotFound,
-            _ => GitHubError::GhFailed(format!("#{number} in '{slug}': {e}")),
-        })?;
+    let stdout = gh::capture(&[
+        "pr",
+        "view",
+        &number.to_string(),
+        "--repo",
+        &slug,
+        "--json",
+        "headRefName,isCrossRepository",
+        "--template",
+        "{{.headRefName}}{{\"\\t\"}}{{.isCrossRepository}}",
+    ])
+    .map_err(|e| match e {
+        gh::GhError::NotFound => GitHubError::GhNotFound,
+        gh::GhError::Failed(detail) => GitHubError::GhFailed(format!("#{number} in '{slug}': {detail}")),
+    })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() {
-            "gh exited with an error".to_string()
-        } else {
-            stderr
-        };
-        return Err(GitHubError::GhFailed(format!(
-            "#{number} in '{slug}': {detail}"
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut fields = stdout.trim().splitn(2, '\t');
     let branch = fields.next().unwrap_or("").trim().to_string();
     let is_cross_repository = fields.next().map(str::trim) == Some("true");

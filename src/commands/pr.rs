@@ -7,13 +7,12 @@
 use crate::ai;
 use crate::commands::workspace;
 use crate::config::{self, Config};
-use crate::git::github;
 use crate::git::pr_actions::MergeMethod;
 use crate::git::pr_search::{self, Category, DashboardPr, EnrichStatus, Relation, Scope};
+use crate::git::{gh, github};
 use crate::ui;
 use crate::ui::pr_picker::{self, PrAction, ReviewerAgent};
 use miette::{Diagnostic, Result};
-use std::process::Command;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -193,15 +192,8 @@ reported problem, summarize your findings, and propose a fix.",
 /// The current GitHub login, for the troubleshoot own-PR check. `None` if `gh`
 /// is unavailable — the caller then errs on the side of confirming.
 fn current_login() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["api", "user", "--jq", ".login"])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let login = gh::capture(&["api", "user", "--jq", ".login"]).ok()?;
+    let login = login.trim().to_string();
     (!login.is_empty()).then_some(login)
 }
 

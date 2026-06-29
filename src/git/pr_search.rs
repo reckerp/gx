@@ -5,10 +5,10 @@
 //! `gh search prs` (a fixed, flat field set), then per-PR enrichment (in this
 //! module's U3 half) fills in review/merge/check status via `gh pr view`.
 
+use super::gh;
 use miette::Diagnostic;
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -212,29 +212,13 @@ fn search_args(scope: &Scope, relation: Relation) -> Vec<String> {
     args
 }
 
-/// Run `gh` with `args` and return stdout, mapping a missing binary to
-/// `GhNotFound` and any non-zero exit to `GhFailed(stderr)`. Shared by every
-/// PR-dashboard `gh` call so the spawn + error-mapping lives in one place.
+/// Run `gh` with `args`, mapping [`gh::GhError`] into this module's [`PrError`]
+/// so the diagnostics stay PR-flavored. The actual spawn lives in [`gh::capture`].
 pub(crate) fn gh_capture(args: &[&str]) -> Result<String, PrError> {
-    let output = Command::new("gh")
-        .args(args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => PrError::GhNotFound,
-            _ => PrError::GhFailed(e.to_string()),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(PrError::GhFailed(if stderr.is_empty() {
-            "gh exited with an error".to_string()
-        } else {
-            stderr
-        }));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    gh::capture(args).map_err(|e| match e {
+        gh::GhError::NotFound => PrError::GhNotFound,
+        gh::GhError::Failed(stderr) => PrError::GhFailed(stderr),
+    })
 }
 
 /// Run a single search and return the matching PRs (status `Loading`).
@@ -301,7 +285,7 @@ struct RawSearchPr {
     url: String,
     repository: RawRepository,
     #[serde(default)]
-    author: RawAuthor,
+    author: gh::RawLogin,
     #[serde(rename = "isDraft")]
     is_draft: bool,
     #[serde(rename = "updatedAt")]
@@ -313,12 +297,6 @@ struct RawRepository {
     name: String,
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
-}
-
-#[derive(Deserialize, Default)]
-struct RawAuthor {
-    #[serde(default)]
-    login: String,
 }
 
 /// Owner from `repository.nameWithOwner` (split on the first `/`). A name with
@@ -511,7 +489,7 @@ struct RawPrView {
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Vec<RawCheck>,
     #[serde(rename = "reviewRequests", default)]
-    review_requests: Vec<RawReviewRequest>,
+    review_requests: Vec<gh::RawReviewRequest>,
     #[serde(rename = "latestReviews", default)]
     latest_reviews: Vec<RawLatestReview>,
     #[serde(rename = "headRefName", default)]
@@ -531,19 +509,9 @@ struct RawCheck {
 }
 
 #[derive(Deserialize, Default)]
-struct RawReviewRequest {
-    #[serde(default)]
-    login: Option<String>,
-    #[serde(default)]
-    slug: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
 struct RawLatestReview {
     #[serde(default)]
-    author: RawAuthor,
+    author: gh::RawLogin,
     #[serde(default)]
     state: String,
 }
@@ -600,7 +568,7 @@ fn parse_review_state(s: &str) -> ReviewState {
     }
 }
 
-fn parse_reviewer_ref(r: &RawReviewRequest) -> ReviewerRef {
+fn parse_reviewer_ref(r: &gh::RawReviewRequest) -> ReviewerRef {
     if let Some(login) = &r.login {
         ReviewerRef::User(login.clone())
     } else if let Some(slug) = &r.slug {
