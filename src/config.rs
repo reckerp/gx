@@ -116,6 +116,17 @@ pub struct WorkspaceConfig {
     /// skipped silently.
     #[serde(default = "default_copy_files")]
     pub copy_files: Vec<String>,
+
+    /// Branches that cleanup must never remove, on top of the always-protected
+    /// set (default branch, `main`, `master`, the current branch, and any
+    /// branch checked out in an active worktree). Maps to `[workspace]
+    /// protected_branches` in the config TOML.
+    #[serde(default)]
+    pub protected_branches: Vec<String>,
+
+    /// Cleanup-lifecycle settings (`[workspace.clean]`).
+    #[serde(default)]
+    pub clean: WorkspaceCleanConfig,
 }
 
 fn default_workspace_root() -> String {
@@ -131,6 +142,34 @@ impl Default for WorkspaceConfig {
         WorkspaceConfig {
             root: default_workspace_root(),
             copy_files: default_copy_files(),
+            protected_branches: Vec::new(),
+            clean: WorkspaceCleanConfig::default(),
+        }
+    }
+}
+
+/// Cleanup-lifecycle settings, mapped to the `[workspace.clean]` table.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceCleanConfig {
+    /// A workspace is "stale" once its conservative age reaches this many days.
+    /// Only consulted by `gx workspace clean --auto --use-threshold`.
+    #[serde(default = "default_threshold_days")]
+    pub threshold_days: u64,
+
+    /// When true, bare `gx workspace clean` behaves as `--auto`.
+    #[serde(default)]
+    pub auto: bool,
+}
+
+fn default_threshold_days() -> u64 {
+    7
+}
+
+impl Default for WorkspaceCleanConfig {
+    fn default() -> Self {
+        WorkspaceCleanConfig {
+            threshold_days: default_threshold_days(),
+            auto: false,
         }
     }
 }
@@ -197,6 +236,14 @@ pub fn load() -> miette::Result<Config> {
     Ok(config)
 }
 
+/// Persist `config` back to the user's global gx config file. Used by
+/// `gx workspace protect`/`unprotect` to update the protected-branch list.
+pub fn store(config: &Config) -> miette::Result<()> {
+    confy::store("gx", Some("config"), config)
+        .map_err(|e| miette::miette!("Failed to save config: {}", e))?;
+    Ok(())
+}
+
 pub fn load_path() -> miette::Result<std::path::PathBuf> {
     let path = confy::get_configuration_file_path("gx", Some("config"))
         .map_err(|e| miette::miette!("Failed to get config path: {}", e))?;
@@ -214,10 +261,57 @@ mod tests {
         assert_eq!(config.ai.model, "opencode/big-pickle");
         assert_eq!(config.workspace.root, "~/gx/workspaces/{repo}");
         assert_eq!(config.workspace.copy_files, vec![".env".to_string()]);
+        assert!(config.workspace.protected_branches.is_empty());
+        assert_eq!(config.workspace.clean.threshold_days, 7);
+        assert!(!config.workspace.clean.auto);
         assert_eq!(config.aliases.get("gpr").map(String::as_str), Some("pr"));
         assert_eq!(config.pr.merge_method, "squash");
         assert!(config.pr.reviewer_ai_fallback);
         assert!(config.pr.orgs.is_empty());
+    }
+
+    #[test]
+    fn test_default_workspace_clean_config() {
+        let clean = WorkspaceCleanConfig::default();
+        assert_eq!(clean.threshold_days, 7);
+        assert!(!clean.auto);
+
+        let workspace = WorkspaceConfig::default();
+        assert!(workspace.protected_branches.is_empty());
+        assert_eq!(workspace.clean.threshold_days, 7);
+    }
+
+    #[test]
+    fn test_workspace_config_roundtrips_clean_and_protected() {
+        // Serialize a config with the new fields and read it back, exercising
+        // both the Serialize and Deserialize derives end-to-end.
+        let mut config = Config::default();
+        config.workspace.protected_branches =
+            vec!["staging".to_string(), "release".to_string()];
+        config.workspace.clean.threshold_days = 10;
+        config.workspace.clean.auto = true;
+
+        let json = serde_json::to_string(&config).expect("config should serialize");
+        let restored: Config = serde_json::from_str(&json).expect("config should deserialize");
+
+        assert_eq!(
+            restored.workspace.protected_branches,
+            vec!["staging".to_string(), "release".to_string()]
+        );
+        assert_eq!(restored.workspace.clean.threshold_days, 10);
+        assert!(restored.workspace.clean.auto);
+    }
+
+    #[test]
+    fn test_workspace_config_without_clean_keeps_defaults() {
+        // Older config files omit the new tables entirely; serde defaults must
+        // keep them loading and populate sensible values.
+        let restored: Config =
+            serde_json::from_str(r#"{"workspace":{"root":".worktrees"}}"#).expect("parses");
+        assert_eq!(restored.workspace.root, ".worktrees");
+        assert_eq!(restored.workspace.clean.threshold_days, 7);
+        assert!(!restored.workspace.clean.auto);
+        assert!(restored.workspace.protected_branches.is_empty());
     }
 
     #[test]

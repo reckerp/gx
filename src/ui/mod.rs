@@ -1,4 +1,5 @@
 pub mod branch_picker;
+pub mod clean_picker;
 pub mod confirm;
 pub mod file_picker;
 pub mod log_viewer;

@@ -317,6 +317,52 @@ pub enum WorkspaceCommands {
     /// Copy setup files (e.g. .env) from the main worktree into this workspace
     Setup,
 
+    /// Clean up workspaces: interactive multi-section picker, or --auto to
+    /// remove every workspace that passes the safety checks
+    Clean {
+        /// Remove all safe workspaces without per-workspace prompts (still asks
+        /// for one final confirmation). Also enabled by `[workspace.clean] auto`.
+        #[arg(long)]
+        auto: bool,
+
+        /// Show what would be removed without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// In --auto mode, only consider workspaces older than the configured
+        /// threshold ([workspace.clean] threshold_days, default 7)
+        #[arg(long)]
+        use_threshold: bool,
+
+        /// Bypass the dirty/untracked/unpushed safety checks. Still protects the
+        /// main and current worktrees, locked worktrees, and protected branches.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Prune stale worktree metadata and delete safe orphan branches
+    Prune {
+        /// Show what would be deleted without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Only prune worktree metadata; do not touch branches
+        #[arg(long)]
+        no_branches: bool,
+    },
+
+    /// Protect a branch from cleanup (defaults to the current branch)
+    Protect {
+        /// Branch to protect (defaults to the current branch)
+        branch: Option<String>,
+    },
+
+    /// Remove a branch from the protected list (defaults to the current branch)
+    Unprotect {
+        /// Branch to unprotect (defaults to the current branch)
+        branch: Option<String>,
+    },
+
     /// Copy files/directories between two workspaces (manual copy tool).
     /// Defaults: target = current workspace, source = main worktree,
     /// paths = configured setup copy files.
@@ -450,6 +496,22 @@ impl Commands {
                     delete_branch,
                 }) => commands::workspace::run_remove(query, force, delete_branch),
                 Some(WorkspaceCommands::Setup) => commands::workspace::run_setup(),
+                Some(WorkspaceCommands::Clean {
+                    auto,
+                    dry_run,
+                    use_threshold,
+                    force,
+                }) => commands::workspace_clean::run_clean(auto, dry_run, use_threshold, force),
+                Some(WorkspaceCommands::Prune {
+                    dry_run,
+                    no_branches,
+                }) => commands::workspace_clean::run_prune(dry_run, no_branches),
+                Some(WorkspaceCommands::Protect { branch }) => {
+                    commands::workspace_clean::run_protect(branch)
+                }
+                Some(WorkspaceCommands::Unprotect { branch }) => {
+                    commands::workspace_clean::run_unprotect(branch)
+                }
                 Some(WorkspaceCommands::Sync {
                     target,
                     paths,

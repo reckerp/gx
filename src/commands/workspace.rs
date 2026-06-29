@@ -1441,9 +1441,15 @@ fn confirm_force_remove(worktree: &Worktree) -> Result<bool> {
     Ok(confirmed)
 }
 
-fn delete_local_branch(main_root: &Path, branch: &str) -> Result<()> {
+pub(crate) fn delete_local_branch(main_root: &Path, branch: &str) -> Result<()> {
     match git::worktree::delete_branch(main_root, branch, false) {
         Ok(()) => Ok(()),
+        // The branch is already gone (e.g. removed earlier in the same cleanup
+        // run): treat that as success rather than aborting the whole operation.
+        Err(GitError::CommandFailed(msg)) if msg.contains("not found") => {
+            eprintln!("Branch '{}' was already deleted", branch);
+            Ok(())
+        }
         Err(GitError::CommandFailed(msg)) if msg.contains("not fully merged") => {
             let confirmed = ui::confirm::run_on_stderr(&format!(
                 "Branch '{}' is not fully merged. Force delete it?",
@@ -1535,7 +1541,7 @@ pub(crate) fn print_go_path(path: &Path) {
     }
 }
 
-fn main_worktree_root(worktrees: &[Worktree]) -> Result<PathBuf, WorkspaceError> {
+pub(crate) fn main_worktree_root(worktrees: &[Worktree]) -> Result<PathBuf, WorkspaceError> {
     worktrees
         .iter()
         .find(|w| w.is_main)
