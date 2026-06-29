@@ -1108,14 +1108,12 @@ pub fn run_interactive() -> Result<()> {
 }
 
 fn pick_workspace(worktrees: &[Worktree]) -> Result<Option<WorkspaceAction>> {
-    let mut terminal = ui::terminal::setup_terminal_stderr()
-        .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
     let summary_lookup = git::worktree::spawn_summary_lookup(worktrees);
     let pull_requests = git::pull_request::spawn_lookup(worktrees);
-    let result = ui::workspace_picker::run(&mut terminal, worktrees, summary_lookup, pull_requests);
-    ui::terminal::restore_terminal_stderr(terminal)
-        .map_err(|e| WorkspaceError::TuiError(e.to_string()))?;
-    result
+    ui::terminal::with_terminal_stderr(|t| {
+        ui::workspace_picker::run(t, worktrees, summary_lookup, pull_requests)
+    })
+    .map_err(|e| WorkspaceError::TuiError(e.to_string()))?
 }
 
 fn create_from_picker(name: String) -> Result<()> {

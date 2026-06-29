@@ -22,12 +22,10 @@ pub fn run() -> Result<()> {
     let mut profile = repo_setup::profile_for_repo(&main_root)?;
     let candidates = repo_setup::discover_copy_candidates(&main_root)?;
 
-    let mut terminal =
-        ui::terminal::setup_terminal().map_err(|e| OnboardingError::TuiError(e.to_string()))?;
-    let selected =
-        ui::setup_file_picker::run(&mut terminal, &candidates, &profile.config.copy_files);
-    ui::terminal::restore_terminal(terminal)
-        .map_err(|e| OnboardingError::TuiError(e.to_string()))?;
+    let selected = ui::terminal::with_terminal(|t| {
+        ui::setup_file_picker::run(t, &candidates, &profile.config.copy_files)
+    })
+    .map_err(|e| OnboardingError::TuiError(e.to_string()))?;
 
     let Some(copy_files) = selected? else {
         eprintln!("Cancelled");

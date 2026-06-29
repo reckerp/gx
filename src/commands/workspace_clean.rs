@@ -319,13 +319,9 @@ fn run_clean_interactive(cfg: &Config) -> Result<()> {
 }
 
 fn pick_clean(inputs: CleanInputs, worktrees: &[Worktree]) -> Result<Option<CleanAction>> {
-    let mut terminal = ui::terminal::setup_terminal_stderr()
-        .map_err(|e| WorkspaceCleanError::TuiError(e.to_string()))?;
     let summary_lookup = git::worktree::spawn_summary_lookup(worktrees);
-    let result = ui::clean_picker::run(&mut terminal, inputs, summary_lookup);
-    ui::terminal::restore_terminal_stderr(terminal)
-        .map_err(|e| WorkspaceCleanError::TuiError(e.to_string()))?;
-    result
+    ui::terminal::with_terminal_stderr(|t| ui::clean_picker::run(t, inputs, summary_lookup))
+        .map_err(|e| WorkspaceCleanError::TuiError(e.to_string()))?
 }
 
 fn apply_clean_action(action: &CleanAction, main_root: &Path) -> Result<()> {

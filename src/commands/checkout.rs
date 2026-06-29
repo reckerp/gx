@@ -77,13 +77,7 @@ pub fn run(create_branch: Option<String>, query: Option<String>) -> Result<()> {
             result.ok_or(CheckoutError::NoMatch { query: q })?
         }
         None => {
-            let mut terminal = ui::terminal::setup_terminal()
-                .map_err(|e| CheckoutError::TuiError(e.to_string()))?;
-
-            let selection = ui::branch_picker::run(&mut terminal, &branches);
-
-            // restore prev terminal state
-            ui::terminal::restore_terminal(terminal)
+            let selection = ui::terminal::with_terminal(|t| ui::branch_picker::run(t, &branches))
                 .map_err(|e| CheckoutError::TuiError(e.to_string()))?;
 
             match selection? {

@@ -92,18 +92,10 @@ pub fn run_interactive() -> Result<()> {
         ai_fallback: cfg.pr.reviewer_ai_fallback,
     };
 
-    let mut terminal =
-        ui::terminal::setup_terminal_stderr().map_err(|e| PrCommandError::Tui(e.to_string()))?;
-    let result = pr_picker::run(
-        &mut terminal,
-        scopes,
-        default_index,
-        launch_repo,
-        agent,
-        merge_method,
-    );
-    ui::terminal::restore_terminal_stderr(terminal)
-        .map_err(|e| PrCommandError::Tui(e.to_string()))?;
+    let result = ui::terminal::with_terminal_stderr(|t| {
+        pr_picker::run(t, scopes, default_index, launch_repo, agent, merge_method)
+    })
+    .map_err(|e| PrCommandError::Tui(e.to_string()))?;
 
     match result? {
         None => {

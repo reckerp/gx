@@ -152,10 +152,8 @@ pub fn run_interactive() -> Result<()> {
         return Ok(());
     }
 
-    let mut terminal =
-        ui::terminal::setup_terminal().map_err(|e| StashError::TuiError(e.to_string()))?;
-    let result = ui::stash_picker::run(&mut terminal, &stashes);
-    ui::terminal::restore_terminal(terminal).map_err(|e| StashError::TuiError(e.to_string()))?;
+    let result = ui::terminal::with_terminal(|t| ui::stash_picker::run(t, &stashes))
+        .map_err(|e| StashError::TuiError(e.to_string()))?;
 
     let Some(selection) = result? else {
         println!("Cancelled");

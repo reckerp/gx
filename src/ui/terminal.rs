@@ -1,14 +1,16 @@
 use crossterm::{cursor, execute, terminal::*};
 use ratatui::prelude::*;
-use std::io::{self, Stderr, Stdout};
+use std::io::{self, Write};
 use std::sync::Once;
 use std::sync::atomic::{AtomicU8, Ordering};
+
+use super::{Term, TermStderr};
 
 // Which TTY currently hosts an alternate-screen TUI: 0 none, 1 stdout, 2 stderr.
 // Read by the panic hook so a panic mid-render still leaves the terminal usable
 // (raw mode off, alternate screen left, cursor shown). Without this, a panic
-// anywhere inside a picker's render/event loop would unwind past the explicit
-// restore and strand the user's terminal.
+// anywhere inside a picker's render/event loop would unwind past the guard's
+// Drop only if it ran — the hook is the belt to the guard's suspenders.
 static ACTIVE_TTY: AtomicU8 = AtomicU8::new(0);
 static PANIC_HOOK: Once = Once::new();
 
@@ -32,39 +34,49 @@ fn ensure_panic_hook() {
     });
 }
 
-pub fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+/// Enter raw mode and the alternate screen on `writer`, tagging `ACTIVE_TTY`
+/// (1 = stdout, 2 = stderr) so the panic hook knows which stream to restore.
+fn enter<W: Write>(mut writer: W, tag: u8) -> io::Result<Terminal<CrosstermBackend<W>>> {
     ensure_panic_hook();
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    ACTIVE_TTY.store(1, Ordering::SeqCst);
-    Terminal::new(CrosstermBackend::new(stdout))
+    execute!(writer, EnterAlternateScreen)?;
+    ACTIVE_TTY.store(tag, Ordering::SeqCst);
+    Terminal::new(CrosstermBackend::new(writer))
 }
 
-pub fn restore_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    ACTIVE_TTY.store(0, Ordering::SeqCst);
-    Ok(())
+/// RAII guard owning an active TUI terminal; restores cooked mode and the main
+/// screen on drop. Because teardown lives in `Drop`, it can't be forgotten or
+/// mis-ordered relative to an early `?`/panic — the failure mode the previous
+/// manual setup/restore call pairs risked.
+struct TerminalGuard<W: Write> {
+    terminal: Terminal<CrosstermBackend<W>>,
 }
 
-/// Terminal that renders to stderr. Used by TUIs whose final result is
-/// printed to stdout so it can be captured by a shell wrapper (e.g.
+impl<W: Write> Drop for TerminalGuard<W> {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, cursor::Show);
+        ACTIVE_TTY.store(0, Ordering::SeqCst);
+    }
+}
+
+/// Run `f` with a TUI terminal rendering to stdout, restoring the terminal
+/// before returning no matter how `f` exits. The returned `io::Result` reports
+/// only terminal *setup* failure; `f`'s own value (e.g. a picker's
+/// `miette::Result`) is returned untouched inside the `Ok`.
+pub fn with_terminal<R>(f: impl FnOnce(&mut Term) -> R) -> io::Result<R> {
+    let mut guard = TerminalGuard {
+        terminal: enter(io::stdout(), 1)?,
+    };
+    Ok(f(&mut guard.terminal))
+}
+
+/// Like [`with_terminal`], but renders to stderr so the TUI's final result can
+/// be printed to stdout and captured by a shell wrapper (e.g.
 /// `cd "$(gx workspace go)"`).
-pub fn setup_terminal_stderr() -> io::Result<Terminal<CrosstermBackend<Stderr>>> {
-    ensure_panic_hook();
-    enable_raw_mode()?;
-    let mut stderr = io::stderr();
-    execute!(stderr, EnterAlternateScreen)?;
-    ACTIVE_TTY.store(2, Ordering::SeqCst);
-    Terminal::new(CrosstermBackend::new(stderr))
-}
-
-pub fn restore_terminal_stderr(mut terminal: Terminal<CrosstermBackend<Stderr>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    ACTIVE_TTY.store(0, Ordering::SeqCst);
-    Ok(())
+pub fn with_terminal_stderr<R>(f: impl FnOnce(&mut TermStderr) -> R) -> io::Result<R> {
+    let mut guard = TerminalGuard {
+        terminal: enter(io::stderr(), 2)?,
+    };
+    Ok(f(&mut guard.terminal))
 }
