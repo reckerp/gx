@@ -175,23 +175,34 @@ pub fn common_git_dir() -> Result<PathBuf, GitError> {
 /// When `create_branch` is true the branch is created (optionally from `base`).
 /// `no_track` prevents the new branch from tracking a remote `base` (useful
 /// when branching off e.g. 'origin/main' without wanting it as upstream).
+/// When `detach` is true, no branch is created or checked out; the worktree is
+/// created with a detached HEAD at `base` (which is then required), mirroring
+/// `git worktree add --detach <path> <base>`.
 pub fn add(
     path: &Path,
     branch: &str,
     create_branch: bool,
     base: Option<&str>,
     no_track: bool,
+    detach: bool,
 ) -> Result<(), GitError> {
     let mut args = vec!["worktree".to_string(), "add".to_string()];
 
-    if create_branch {
+    if detach {
+        args.push("--detach".to_string());
+        // End option parsing so a path or base beginning with '-' is never read
+        // as a flag.
+        args.push("--".to_string());
+        args.push(path.display().to_string());
+        if let Some(base) = base {
+            args.push(base.to_string());
+        }
+    } else if create_branch {
         if no_track {
             args.push("--no-track".to_string());
         }
         args.push("-b".to_string());
         args.push(branch.to_string());
-        // End option parsing so a path or base beginning with '-' is never read
-        // as a flag.
         args.push("--".to_string());
         args.push(path.display().to_string());
         if let Some(base) = base {
@@ -212,6 +223,201 @@ pub fn add(
     )?;
 
     Ok(())
+}
+
+/// A file staged in the index, as reported by `git diff --cached --name-status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedEntry {
+    /// The current (post-rename) path of the staged file.
+    pub path: String,
+    pub status: StagedStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed { from: String },
+    Copied { from: String },
+    Other(char),
+}
+
+/// List the files staged in the index of the worktree at `root`.
+/// Runs `git -C <root> diff --cached --name-status -z` and parses the
+/// NUL-delimited porcelain output (NUL-delimited keeps paths unambiguous and
+/// gives rename/copy entries their old+new path as separate fields).
+pub fn staged_entries(root: &Path) -> Result<Vec<StagedEntry>, GitError> {
+    let output = git_exec::exec(
+        vec![
+            "-C".to_string(),
+            root.display().to_string(),
+            "diff".to_string(),
+            "--cached".to_string(),
+            "--name-status".to_string(),
+            "-z".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(parse_name_status(&output))
+}
+
+/// Parse the NUL-delimited output of `git diff --cached --name-status -z`.
+/// Each record is a status field (e.g. "A", "M", "R100") followed by one path,
+/// or two paths for renames/copies (old then new). Fields are NUL-separated.
+fn parse_name_status(out: &str) -> Vec<StagedEntry> {
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut entries = Vec::new();
+
+    while let Some(status_field) = fields.next() {
+        let code = status_field.chars().next().unwrap_or(' ');
+        match code {
+            'R' | 'C' => {
+                let Some(from) = fields.next() else { break };
+                let Some(to) = fields.next() else { break };
+                let status = if code == 'R' {
+                    StagedStatus::Renamed {
+                        from: from.to_string(),
+                    }
+                } else {
+                    StagedStatus::Copied {
+                        from: from.to_string(),
+                    }
+                };
+                entries.push(StagedEntry {
+                    path: to.to_string(),
+                    status,
+                });
+            }
+            other => {
+                let Some(path) = fields.next() else { break };
+                let status = match other {
+                    'A' => StagedStatus::Added,
+                    'M' => StagedStatus::Modified,
+                    'D' => StagedStatus::Deleted,
+                    c => StagedStatus::Other(c),
+                };
+                entries.push(StagedEntry {
+                    path: path.to_string(),
+                    status,
+                });
+            }
+        }
+    }
+
+    entries
+}
+
+/// Read the staged (index) contents of `path` in the worktree at `root` via
+/// `git -C <root> show :<path>`. Returns raw bytes so binary and
+/// whitespace-significant files round-trip exactly.
+pub fn show_staged(root: &Path, path: &str) -> Result<Vec<u8>, GitError> {
+    git_exec::exec_bytes(
+        vec![
+            "-C".to_string(),
+            root.display().to_string(),
+            "show".to_string(),
+            format!(":{}", path),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// Switch the worktree at `path` to an existing local `branch`
+/// (`git -C <path> switch <branch>`). Used by the existing-path branch
+/// switch flow when the requested branch differs from what's checked out.
+/// `switch` (rather than `checkout <branch>`) only ever resolves a branch,
+/// never a pathspec, so a `--` separator is unnecessary and would misparse.
+pub fn switch_branch(path: &Path, branch: &str) -> Result<(), GitError> {
+    git_exec::exec(
+        vec![
+            "-C".to_string(),
+            path.display().to_string(),
+            "switch".to_string(),
+            branch.to_string(),
+        ],
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// True when `base` resolves to a commit using only local refs
+/// (`git rev-parse --verify --quiet <base>^{commit}`). Used to give a targeted
+/// offline diagnostic when `--no-fetch` is set before calling [`add`].
+pub fn ref_resolvable(base: &str) -> Result<bool, GitError> {
+    match git_exec::exec(
+        vec![
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            "--quiet".to_string(),
+            format!("{}^{{commit}}", base),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    ) {
+        Ok(out) => Ok(!out.trim().is_empty()),
+        // rev-parse --verify --quiet exits non-zero with no stderr when the ref
+        // is unknown; treat that as "not resolvable" rather than a hard error.
+        Err(GitError::CommandFailed(msg)) if msg.trim().is_empty() => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Detect a git ref-namespace conflict for a branch we are about to create.
+/// Git stores branches as files under `refs/heads`, so `refs/heads/foo` (a
+/// file) and `refs/heads/foo/bar` (a directory) cannot coexist. Returns the
+/// first existing branch that conflicts with `branch_name`, if any.
+pub fn conflicting_branch(branch_name: &str) -> Result<Option<String>, GitError> {
+    let output = git_exec::exec(
+        vec![
+            "for-each-ref".to_string(),
+            "--format=%(refname:short)".to_string(),
+            "refs/heads".to_string(),
+        ],
+        ExecOptions {
+            capture: true,
+            ..Default::default()
+        },
+    )?;
+
+    let existing: Vec<String> = output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    Ok(find_ref_conflict(branch_name, &existing))
+}
+
+/// Pure conflict check over a list of existing branch names. `wanted` conflicts
+/// with an existing branch when one is a strict path-prefix of the other:
+/// existing `foo` blocks `foo/bar` (file vs directory), and existing `foo/bar`
+/// blocks `foo` (directory vs file). An exact match is not a conflict here
+/// (that case is handled separately as "branch already exists").
+fn find_ref_conflict(wanted: &str, existing: &[String]) -> Option<String> {
+    existing
+        .iter()
+        .find(|name| is_path_prefix(name, wanted) || is_path_prefix(wanted, name))
+        .cloned()
+}
+
+/// True when `prefix` is a strict slash-delimited path prefix of `name`
+/// (e.g. "foo" is a prefix of "foo/bar", but not of "foobar" or "foo").
+fn is_path_prefix(prefix: &str, name: &str) -> bool {
+    name.len() > prefix.len()
+        && name.starts_with(prefix)
+        && name.as_bytes()[prefix.len()] == b'/'
 }
 
 /// Rebase the branch checked out in the worktree at `path` onto `base`
@@ -296,6 +502,120 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
         },
     )?;
     Ok(())
+}
+
+/// Move the worktree at `path` to `new_path`. Runs git from `from` (the main
+/// worktree) and prefers `git worktree move` over a manual filesystem move so
+/// Git's administrative files (`.git` pointer, gitdir link) stay consistent.
+pub fn move_worktree(from: &Path, path: &Path, new_path: &Path) -> Result<(), GitError> {
+    git_exec::exec(
+        move_worktree_args(from, path, new_path),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Lock the worktree at `path` so cleanup and `git worktree prune` skip it.
+/// Runs git from `from` (the main worktree). An optional `reason` is recorded
+/// by git and shown in `git worktree list --verbose`.
+pub fn lock(from: &Path, path: &Path, reason: Option<&str>) -> Result<(), GitError> {
+    git_exec::exec(
+        lock_args(from, path, reason),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Clear the lock on the worktree at `path`. Runs git from `from` (the main
+/// worktree).
+pub fn unlock(from: &Path, path: &Path) -> Result<(), GitError> {
+    git_exec::exec(
+        unlock_args(from, path),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Repair worktree administrative files (the two-way links between the main
+/// repository and its linked worktrees). With no `paths`, git repairs every
+/// worktree; otherwise it repairs only the listed ones. Mostly for recovery
+/// after a worktree directory or the main repo has been moved. Runs git from
+/// `from` (the main worktree).
+pub fn repair(from: &Path, paths: &[PathBuf]) -> Result<(), GitError> {
+    git_exec::exec(
+        repair_args(from, paths),
+        ExecOptions {
+            silent: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+// The arg builders are split out as pure functions so they can be unit tested
+// without spawning git; `--` always ends option parsing so paths beginning with
+// '-' are treated as paths, never flags.
+
+fn move_worktree_args(from: &Path, path: &Path, new_path: &Path) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "move".to_string(),
+        "--".to_string(),
+        path.display().to_string(),
+        new_path.display().to_string(),
+    ]
+}
+
+fn lock_args(from: &Path, path: &Path, reason: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "lock".to_string(),
+    ];
+    if let Some(reason) = reason {
+        args.push("--reason".to_string());
+        args.push(reason.to_string());
+    }
+    args.push("--".to_string());
+    args.push(path.display().to_string());
+    args
+}
+
+fn unlock_args(from: &Path, path: &Path) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "unlock".to_string(),
+        "--".to_string(),
+        path.display().to_string(),
+    ]
+}
+
+fn repair_args(from: &Path, paths: &[PathBuf]) -> Vec<String> {
+    let mut args = vec![
+        "-C".to_string(),
+        from.display().to_string(),
+        "worktree".to_string(),
+        "repair".to_string(),
+    ];
+    if !paths.is_empty() {
+        args.push("--".to_string());
+        args.extend(paths.iter().map(|p| p.display().to_string()));
+    }
+    args
 }
 
 /// Start the local status lookup on a background thread so the workspace picker
@@ -820,6 +1140,95 @@ mod tests {
     }
 
     #[test]
+    fn test_find_ref_conflict() {
+        let existing = vec!["foo".to_string(), "feat/a".to_string(), "main".to_string()];
+
+        // existing 'foo' (a file) blocks creating 'foo/bar' (a directory)
+        assert_eq!(find_ref_conflict("foo/bar", &existing), Some("foo".to_string()));
+        // existing 'feat/a' (a directory) blocks creating 'feat' (a file)
+        assert_eq!(find_ref_conflict("feat", &existing), Some("feat/a".to_string()));
+
+        // exact matches are not conflicts (handled as "already exists")
+        assert_eq!(find_ref_conflict("foo", &existing), None);
+        assert_eq!(find_ref_conflict("main", &existing), None);
+
+        // unrelated names and shared text prefixes (not path prefixes) are fine
+        assert_eq!(find_ref_conflict("bar", &existing), None);
+        assert_eq!(find_ref_conflict("foobar", &existing), None);
+        assert_eq!(find_ref_conflict("feat-b", &existing), None);
+    }
+
+    #[test]
+    fn test_parse_name_status_added_modified_deleted() {
+        // NUL-delimited: each record is "<status>\0<path>\0"
+        let out = "A\0src/new.rs\0M\0src/main.rs\0D\0old.rs\0";
+        let entries = parse_name_status(out);
+
+        assert_eq!(
+            entries,
+            vec![
+                StagedEntry {
+                    path: "src/new.rs".to_string(),
+                    status: StagedStatus::Added,
+                },
+                StagedEntry {
+                    path: "src/main.rs".to_string(),
+                    status: StagedStatus::Modified,
+                },
+                StagedEntry {
+                    path: "old.rs".to_string(),
+                    status: StagedStatus::Deleted,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_name_status_rename_has_from_and_to() {
+        // Renames carry a similarity score (R100) then old\0new.
+        let out = "R100\0src/old.rs\0src/new.rs\0M\0other.rs\0";
+        let entries = parse_name_status(out);
+
+        assert_eq!(
+            entries,
+            vec![
+                StagedEntry {
+                    path: "src/new.rs".to_string(),
+                    status: StagedStatus::Renamed {
+                        from: "src/old.rs".to_string(),
+                    },
+                },
+                StagedEntry {
+                    path: "other.rs".to_string(),
+                    status: StagedStatus::Modified,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_name_status_copy_has_from_and_to() {
+        let out = "C75\0src/template.rs\0src/copy.rs\0";
+        let entries = parse_name_status(out);
+
+        assert_eq!(
+            entries,
+            vec![StagedEntry {
+                path: "src/copy.rs".to_string(),
+                status: StagedStatus::Copied {
+                    from: "src/template.rs".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_name_status_empty() {
+        assert!(parse_name_status("").is_empty());
+        assert!(parse_name_status("\0").is_empty());
+    }
+
+    #[test]
     fn test_match_score_slash_dash_interchangeable() {
         let matcher = SkimMatcherV2::default();
         let w = worktree("feat-expose-rationale", Some("feat/expose-rationale"));
@@ -833,5 +1242,80 @@ mod tests {
         let w = worktree("custom-dir", Some("fix/null-check"));
         assert!(w.match_score(&matcher, "fix-null").is_some());
         assert!(w.match_score(&matcher, "fix/null").is_some());
+    }
+
+    #[test]
+    fn test_move_worktree_args() {
+        let args = move_worktree_args(
+            Path::new("/repo"),
+            Path::new("/ws/feature"),
+            Path::new("/ws/moved"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-C",
+                "/repo",
+                "worktree",
+                "move",
+                "--",
+                "/ws/feature",
+                "/ws/moved"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lock_args_with_and_without_reason() {
+        let with_reason = lock_args(
+            Path::new("/repo"),
+            Path::new("/ws/feature"),
+            Some("long review"),
+        );
+        assert_eq!(
+            with_reason,
+            vec![
+                "-C",
+                "/repo",
+                "worktree",
+                "lock",
+                "--reason",
+                "long review",
+                "--",
+                "/ws/feature"
+            ]
+        );
+
+        let without_reason = lock_args(Path::new("/repo"), Path::new("/ws/feature"), None);
+        assert_eq!(
+            without_reason,
+            vec!["-C", "/repo", "worktree", "lock", "--", "/ws/feature"]
+        );
+    }
+
+    #[test]
+    fn test_unlock_args() {
+        let args = unlock_args(Path::new("/repo"), Path::new("/ws/feature"));
+        assert_eq!(
+            args,
+            vec!["-C", "/repo", "worktree", "unlock", "--", "/ws/feature"]
+        );
+    }
+
+    #[test]
+    fn test_repair_args_forwards_paths() {
+        // No paths: git repairs every worktree, so no `--` / path args.
+        let all = repair_args(Path::new("/repo"), &[]);
+        assert_eq!(all, vec!["-C", "/repo", "worktree", "repair"]);
+
+        // Targeted: paths are forwarded after `--`.
+        let targeted = repair_args(
+            Path::new("/repo"),
+            &[PathBuf::from("/ws/a"), PathBuf::from("/ws/b")],
+        );
+        assert_eq!(
+            targeted,
+            vec!["-C", "/repo", "worktree", "repair", "--", "/ws/a", "/ws/b"]
+        );
     }
 }

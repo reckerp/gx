@@ -12,6 +12,22 @@ pub struct ExecOptions {
 }
 
 pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError> {
+    let stdout = exec_inner(args, options)?;
+    Ok(String::from_utf8_lossy(&stdout).trim().to_string())
+}
+
+/// Like [`exec`], but returns the command's stdout as raw bytes without
+/// lossy UTF-8 conversion or trimming. Needed when the content must be
+/// preserved exactly (e.g. `git show :<path>` for staged file contents,
+/// which may be binary or whitespace-significant).
+pub fn exec_bytes(args: Vec<String>, options: ExecOptions) -> Result<Vec<u8>, GitError> {
+    exec_inner(args, options)
+}
+
+/// Shared implementation behind [`exec`] and [`exec_bytes`]: run git, honor
+/// the `inherit`/`silent`/`capture` options, and return raw stdout bytes on
+/// success or a mapped error from stderr on failure.
+fn exec_inner(args: Vec<String>, options: ExecOptions) -> Result<Vec<u8>, GitError> {
     let mut cmd = Command::new("git");
     cmd.args(&args);
 
@@ -26,7 +42,7 @@ pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError>
             return Err(GitError::CommandFailed("Command failed".to_string()));
         }
 
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
 
     // Always capture output so error messages can be reported even in silent mode;
@@ -49,7 +65,7 @@ pub fn exec(args: Vec<String>, options: ExecOptions) -> Result<String, GitError>
         return Err(map_git_error(stderr));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout)
 }
 
 fn map_git_error(stderr: String) -> GitError {
@@ -78,6 +94,28 @@ mod tests {
     #[test]
     fn test_exec_fail() {
         let result = exec(vec!["notfound".to_string()], ExecOptions::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_exec_bytes_preserves_raw_output() {
+        // exec_bytes must not trim: --version output ends in a newline that
+        // the String-returning exec() strips.
+        let bytes = exec_bytes(
+            vec!["--version".to_string()],
+            ExecOptions {
+                capture: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(bytes.starts_with(b"git version"));
+        assert!(bytes.ends_with(b"\n"));
+    }
+
+    #[test]
+    fn test_exec_bytes_fail() {
+        let result = exec_bytes(vec!["notfound".to_string()], ExecOptions::default());
         assert!(result.is_err());
     }
 
