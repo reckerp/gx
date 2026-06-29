@@ -16,6 +16,43 @@ brew install reckerp/tap/gx
 cargo install --path .
 ```
 
+## Agent Skills
+
+GX ships agent skills in the top-level `skills/` directory. They are designed for autonomous workflows that use gx as the guide rail for workspaces and repo onboarding.
+
+Included skills:
+
+- `gx-workspace-workflow` - automatically use gx workspaces for new autonomous coding tasks and for any `git worktree` request
+- `gx-onboarding-workflow` - configure repeatable workspace setup for autonomous agents
+
+Install them with the Vercel skills CLI:
+
+```bash
+# List skills available from this repo
+npx skills add reckerp/gx --list
+
+# Install the main workspace skill globally
+npx skills add reckerp/gx --skill gx-workspace-workflow --global
+
+# Install both gx skills globally
+npx skills add reckerp/gx --skill gx-workspace-workflow --skill gx-onboarding-workflow --global
+```
+
+The CLI detects supported agents automatically. To target one explicitly, add `--agent opencode`, `--agent claude-code`, `--agent cursor`, or another supported agent. Omit `--global` to install into the current project instead of the user-level agent skills directory.
+
+When developing this repo locally:
+
+```bash
+npx skills add . --list
+npx skills add . --skill gx-workspace-workflow --global
+```
+
+You can also use a skill once without installing it:
+
+```bash
+npx skills use reckerp/gx --skill gx-workspace-workflow
+```
+
 ## Development
 
 ### Building
@@ -188,6 +225,30 @@ gx workspace new <name> -b <branch> # Check out an existing/specific branch
 gx workspace new <github-url> # Resolve a PR/branch URL (or '#13') to a branch
                               # and create a workspace named after that branch
 gx workspace new <name> --no-setup # Skip copying setup files and setup script
+gx workspace new <name> --no-cd    # Create the workspace but stay put (no shell
+                                   # navigation; stdout stays empty for scripts)
+gx workspace new <name> --no-fetch # Offline: resolve the base from local refs
+                                   # only (skips fetching origin). If the base
+                                   # can't be resolved locally, gx says so and
+                                   # suggests retrying without --no-fetch.
+gx workspace new feat/x --from-staged          # Extract work staged in the
+                                               # current workspace: copy the
+                                               # staged file contents into the
+                                               # new one (the source is left
+                                               # untouched)
+gx workspace new feat/x --from-staged a.rs b.rs # ...limited to specific paths.
+                                               # Staged deletions are skipped
+                                               # (no content to copy).
+gx workspace new <name> --detach   # Detached HEAD instead of a new branch
+                                   # (mirrors 'git worktree add --detach'; pass
+                                   # a <base> to detach at a specific commit)
+gx workspace new <name> --track    # Set the base's remote branch as the new
+                                   # branch's upstream (mirrors git tracking)
+# If a branch name collides with an existing one in git's ref namespace
+# (e.g. 'foo/bar' when branch 'foo' exists), gx explains the conflict instead
+# of letting 'git worktree add' fail cryptically. If the target path is already
+# a worktree on a clean, different branch, gx safely switches it (or navigates
+# to wherever the branch is already checked out).
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)
 gx workspace go <github-url>       # Switch to the workspace on a PR/branch's branch
@@ -210,6 +271,14 @@ gx workspace sync <target> # Copy into <target> (workspace name, branch, fuzzy
 gx workspace sync <target> .env config/local.toml # Copy explicit paths
 gx workspace sync <target> --from staging .env.local # Copy from another source
 gx workspace sync <target> --dry-run               # Print what would be copied
+
+gx workspace root          # Print the main worktree root, e.g. cd "$(gx workspace root)"
+gx workspace move <query> <new-path> # Move a workspace to a new path (refuses the
+                                     # main worktree and existing destinations)
+gx workspace lock <query> [--reason <reason>]  # Lock a workspace so cleanup and
+                                               # 'git worktree prune' skip it
+gx workspace unlock <query> # Clear a workspace lock
+gx workspace repair [query] # Repair worktree admin files after a move (all if omitted)
 ```
 
 **`setup` vs `sync`:** `gx workspace setup` applies the configured policy (copy files plus the setup script) for the current workspace. `gx workspace sync` is the manual copy tool: it copies arbitrary paths (defaulting to the configured `copy_files`) from a source workspace (defaulting to the main worktree) into a target workspace (defaulting to the current one). Directories are copied recursively, parent directories are created as needed, and missing source paths are reported without aborting the rest of the sync.

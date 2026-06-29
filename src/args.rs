@@ -188,6 +188,31 @@ pub enum WorkspaceCommands {
         /// Skip copying setup files (e.g. .env) into the new workspace
         #[arg(long)]
         no_setup: bool,
+
+        /// Create the workspace but do not request shell navigation
+        #[arg(long)]
+        no_cd: bool,
+
+        /// Skip fetching origin; resolve the base from local refs only
+        #[arg(long)]
+        no_fetch: bool,
+
+        /// Copy staged file contents from the current workspace into the new
+        /// one (optionally limited to PATHS)
+        #[arg(long, num_args = 0.., value_name = "PATH")]
+        from_staged: Option<Vec<String>>,
+
+        /// Skip workspace creation hooks
+        #[arg(long)]
+        no_hooks: bool,
+
+        /// Create the workspace with a detached HEAD instead of a new branch
+        #[arg(long, conflicts_with_all = ["branch", "track"])]
+        detach: bool,
+
+        /// Set the base's remote branch as the new branch's upstream
+        #[arg(long)]
+        track: bool,
     },
 
     /// Switch to a workspace (prints its path; cd handled by 'gx setup' shell wrapper)
@@ -250,6 +275,42 @@ pub enum WorkspaceCommands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Print the main worktree root (for use in scripts, e.g. cd "$(gx workspace root)")
+    Root,
+
+    /// Move a workspace to a new path
+    #[command(alias = "mv")]
+    Move {
+        /// Workspace to move (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+
+        /// New path for the workspace (relative paths resolve against the
+        /// current directory; '~' is expanded)
+        new_path: String,
+    },
+
+    /// Lock a workspace so cleanup and 'git worktree prune' skip it
+    Lock {
+        /// Workspace to lock (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+
+        /// Optional reason recorded by git and shown in 'git worktree list --verbose'
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Unlock a previously locked workspace
+    Unlock {
+        /// Workspace to unlock (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+    },
+
+    /// Repair worktree administrative files (recovery for moved or damaged worktrees)
+    Repair {
+        /// Workspace to repair (repairs all worktrees when omitted)
+        workspace: Option<String>,
+    },
 }
 
 impl Commands {
@@ -296,7 +357,26 @@ impl Commands {
                     base,
                     branch,
                     no_setup,
-                }) => commands::workspace::run_new(name, base, branch, no_setup),
+                    no_cd,
+                    no_fetch,
+                    from_staged,
+                    no_hooks,
+                    detach,
+                    track,
+                }) => commands::workspace::run_new(
+                    name,
+                    commands::workspace::NewWorkspaceOptions {
+                        base,
+                        branch,
+                        no_setup,
+                        no_cd,
+                        no_fetch,
+                        from_staged,
+                        no_hooks,
+                        detach,
+                        track,
+                    },
+                ),
                 Some(WorkspaceCommands::Go { query }) => commands::workspace::run_go(query),
                 Some(WorkspaceCommands::List) => commands::workspace::run_list(),
                 Some(WorkspaceCommands::Update { query, base }) => {
@@ -314,6 +394,20 @@ impl Commands {
                     from,
                     dry_run,
                 }) => commands::workspace::run_sync(target, from, paths, dry_run),
+                Some(WorkspaceCommands::Root) => commands::workspace::run_root(),
+                Some(WorkspaceCommands::Move {
+                    workspace,
+                    new_path,
+                }) => commands::workspace::run_move(workspace, new_path),
+                Some(WorkspaceCommands::Lock { workspace, reason }) => {
+                    commands::workspace::run_lock(workspace, reason)
+                }
+                Some(WorkspaceCommands::Unlock { workspace }) => {
+                    commands::workspace::run_unlock(workspace)
+                }
+                Some(WorkspaceCommands::Repair { workspace }) => {
+                    commands::workspace::run_repair(workspace)
+                }
             },
             Commands::Pr { action } => match action {
                 None => commands::pr::run_interactive(),

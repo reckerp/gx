@@ -2,7 +2,7 @@ use crate::git::{self, GitError, worktree::Worktree};
 use crate::repo_setup::ScriptRun;
 use crate::ui;
 use crate::ui::workspace_picker::WorkspaceAction;
-use crate::{config, repo_setup};
+use crate::{config, repo_config, repo_setup};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::{Diagnostic, Result};
 use std::collections::HashSet;
@@ -49,6 +49,29 @@ pub enum WorkspaceError {
     )]
     RemoveMain,
 
+    #[error("Cannot move the main worktree")]
+    #[diagnostic(
+        code(gx::workspace::move_main),
+        help(
+            "The main worktree is the original repository checkout; move it with 'git worktree move' manually if you must"
+        )
+    )]
+    MoveMain,
+
+    #[error("Destination '{0}' already exists")]
+    #[diagnostic(
+        code(gx::workspace::destination_exists),
+        help("Choose a path that does not exist yet")
+    )]
+    DestinationExists(PathBuf),
+
+    #[error("Cannot lock the main worktree")]
+    #[diagnostic(
+        code(gx::workspace::lock_main),
+        help("The main worktree is the original repository checkout and cannot be locked")
+    )]
+    LockMain,
+
     #[error("Invalid workspace name: {0}")]
     #[diagnostic(code(gx::workspace::invalid_name))]
     InvalidName(String),
@@ -94,22 +117,65 @@ pub enum WorkspaceError {
         help("Set $EDITOR (or $VISUAL) to your editor, e.g. 'export EDITOR=nvim'")
     )]
     EditorFailed(String),
+
+    #[error(
+        "Cannot create branch '{wanted}' because it conflicts with existing branch '{existing}'."
+    )]
+    #[diagnostic(
+        code(gx::workspace::ref_conflict),
+        help(
+            "Options:\n  1. Use a different branch name\n  2. Delete or rename the conflicting branch\n  3. Check out the existing branch instead"
+        )
+    )]
+    RefConflict { wanted: String, existing: String },
+
+    #[error("Could not resolve base '{base}' from local refs")]
+    #[diagnostic(
+        code(gx::workspace::base_unresolved_offline),
+        help("--no-fetch was used; retry without it to refresh remote refs")
+    )]
+    BaseUnresolvedOffline { base: String },
+
+    #[error("Conflicting flags: {0}")]
+    #[diagnostic(code(gx::workspace::conflicting_flags))]
+    ConflictingFlags(String),
+}
+
+/// Options for [`run_new`] / [`create_workspace`], gathered into one struct so
+/// the function signatures stay readable as creation flags accumulate.
+#[derive(Debug, Default, Clone)]
+pub struct NewWorkspaceOptions {
+    /// Explicit base branch/commit/tag for the new branch.
+    pub base: Option<String>,
+    /// Branch to check out (created if it doesn't exist).
+    pub branch: Option<String>,
+    /// Skip copying setup files / running the setup script.
+    pub no_setup: bool,
+    /// Create the workspace but do not request shell navigation.
+    pub no_cd: bool,
+    /// Skip fetching origin; resolve the base from local refs only.
+    pub no_fetch: bool,
+    /// Copy staged file contents from the current workspace. `None` means the
+    /// flag was absent; `Some(vec)` means copy all staged files (empty vec) or
+    /// only the listed paths (non-empty vec).
+    pub from_staged: Option<Vec<String>>,
+    /// Skip the repo policy's pre- and post-create hooks.
+    pub no_hooks: bool,
+    /// Create the workspace with a detached HEAD instead of a new branch.
+    pub detach: bool,
+    /// Set the base's remote branch as the new branch's upstream.
+    pub track: bool,
 }
 
 /// Create a new workspace (worktree) and print its path to stdout so the
 /// shell wrapper from `gx setup` can cd into it.
-pub fn run_new(
-    name: String,
-    base: Option<String>,
-    branch: Option<String>,
-    no_setup: bool,
-) -> Result<()> {
+pub fn run_new(name: String, mut opts: NewWorkspaceOptions) -> Result<()> {
     // A GitHub pull-request/branch URL (or '#123') resolves to a branch; the
     // workspace is named after that branch.
-    let (name, branch) = match git::github::parse_ref(&name) {
+    let name = match git::github::parse_ref(&name) {
         Some(gh_ref) => {
             let resolved = git::github::resolve_branch(&gh_ref)?;
-            if let Some(explicit) = &branch
+            if let Some(explicit) = &opts.branch
                 && explicit != &resolved
             {
                 eprintln!(
@@ -117,13 +183,21 @@ pub fn run_new(
                     explicit, resolved
                 );
             }
-            (resolved.clone(), Some(resolved))
+            opts.branch = Some(resolved.clone());
+            resolved
         }
-        None => (name, branch),
+        None => name,
     };
 
-    let path = create_workspace(&name, base, branch, no_setup)?;
-    print_go_path(&path);
+    let no_cd = opts.no_cd;
+    let path = create_workspace(&name, &opts)?;
+    if no_cd {
+        // stdout stays empty for scripts/batch creation; the workspace path was
+        // already reported on stderr by create_workspace.
+        eprintln!("Staying in the current workspace (--no-cd)");
+    } else {
+        print_go_path(&path);
+    }
     Ok(())
 }
 
@@ -138,30 +212,53 @@ pub fn ensure_workspace_for_branch(branch: &str) -> Result<PathBuf> {
     {
         return Ok(existing.path.clone());
     }
-    create_workspace(branch, None, None, false)
+    create_workspace(branch, &NewWorkspaceOptions::default())
 }
 
 /// Create a workspace and return its canonical path, with no stdout side
-/// effects. Shared core of [`run_new`] and [`ensure_workspace_for_branch`].
-fn create_workspace(
-    name: &str,
-    base: Option<String>,
-    branch: Option<String>,
-    no_setup: bool,
-) -> Result<PathBuf> {
+/// effects (except the shell-navigation path printed by the existing-path
+/// switch flow). Shared core of [`run_new`] and [`ensure_workspace_for_branch`].
+fn create_workspace(name: &str, opts: &NewWorkspaceOptions) -> Result<PathBuf> {
     validate_name(name)?;
+
+    // --detach replaces the new branch with a detached HEAD, so a branch name
+    // makes no sense alongside it.
+    if opts.detach && opts.branch.is_some() {
+        return Err(WorkspaceError::ConflictingFlags(
+            "--detach cannot be combined with --branch".to_string(),
+        )
+        .into());
+    }
+    if opts.detach && opts.track {
+        return Err(WorkspaceError::ConflictingFlags(
+            "--detach cannot be combined with --track".to_string(),
+        )
+        .into());
+    }
 
     // Branch names may contain '/' (e.g. 'feat/expose-rationale'), but the
     // workspace directory must be a single path component.
     let dir_name = git::worktree::flatten_slashes(name);
 
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
-    if let Some(existing) = worktrees.iter().find(|w| w.name == dir_name) {
-        return Err(WorkspaceError::AlreadyExists(dir_name, existing.path.clone()).into());
-    }
 
     let cfg = config::load()?;
     let main_root = main_worktree_root(&worktrees)?;
+
+    // Resolve the full workspace policy: built-in defaults < global config <
+    // personal profile < shared .gx/workspace.toml < local override. CLI flags
+    // (e.g. a future `--no-hooks`) are applied on top by the caller / via the
+    // `run_hooks` gate below.
+    let personal = repo_setup::profile_for_repo(&main_root)?;
+    let (shared, local) = repo_config::load_repo_layers(&main_root)?;
+    let policy = repo_config::resolve(
+        &cfg,
+        &personal,
+        shared.as_ref(),
+        local.as_ref(),
+        &main_root,
+    );
+
     let path = workspace_path(
         &main_root,
         home_dir().as_deref(),
@@ -169,21 +266,46 @@ fn create_workspace(
         &dir_name,
     );
 
+    let branch_name = opts.branch.clone().unwrap_or_else(|| name.to_string());
+
+    // The path may already host a worktree on another branch; offer a safe
+    // switch before treating the existing path/name as a hard conflict.
+    if let Some(handled) = try_switch_existing(&worktrees, &path, &branch_name, opts)? {
+        return Ok(handled);
+    }
+
+    if let Some(existing) = worktrees.iter().find(|w| w.name == dir_name) {
+        return Err(WorkspaceError::AlreadyExists(dir_name, existing.path.clone()).into());
+    }
     if path.exists() {
         return Err(WorkspaceError::AlreadyExists(dir_name, path).into());
     }
 
-    let branch_name = branch.unwrap_or_else(|| name.to_string());
     let branch_exists_locally =
         git::worktree::branch_exists(&branch_name).map_err(WorkspaceError::GitError)?;
+
+    // When creating a new branch, a ref-namespace conflict (e.g. existing 'foo'
+    // vs wanted 'foo/bar') would make `git worktree add` fail with an opaque
+    // message; detect it first and explain the options.
+    if !opts.detach
+        && !branch_exists_locally
+        && let Some(existing) =
+            git::worktree::conflicting_branch(&branch_name).map_err(WorkspaceError::GitError)?
+    {
+        return Err(WorkspaceError::RefConflict {
+            wanted: branch_name,
+            existing,
+        }
+        .into());
+    }
 
     // Resolve what the new branch should start from: an explicit base wins,
     // then a matching remote branch (like plain 'git checkout'), otherwise
     // the default branch of origin (e.g. 'origin/main') instead of HEAD.
     let mut tracking_remote: Option<String> = None;
     let mut default_base: Option<String> = None;
-    let (create_branch, base) = if branch_exists_locally {
-        if let Some(base) = &base {
+    let (create_branch, base) = if branch_exists_locally && !opts.detach {
+        if let Some(base) = &opts.base {
             eprintln!(
                 "warning: ignoring base '{}'; branch '{}' already exists",
                 base, branch_name
@@ -193,11 +315,14 @@ fn create_workspace(
     } else {
         // Refresh origin's remote-tracking refs first so the new branch starts
         // from the actual state of origin (e.g. origin/main), not a stale
-        // local snapshot from the last fetch.
-        fetch_origin();
+        // local snapshot from the last fetch. --no-fetch skips this for offline
+        // use.
+        if !opts.no_fetch {
+            fetch_origin();
+        }
 
-        let base = match base {
-            Some(base) => Some(base),
+        let base = match &opts.base {
+            Some(base) => Some(base.clone()),
             None => {
                 tracking_remote = git::worktree::find_remote_branch(&branch_name)
                     .map_err(WorkspaceError::GitError)?;
@@ -211,8 +336,31 @@ fn create_workspace(
                 }
             }
         };
-        (true, base)
+        (!opts.detach, base)
     };
+
+    // When offline, a remote base may not exist locally; give a targeted hint
+    // instead of letting `git worktree add` fail with a raw "invalid reference".
+    if opts.no_fetch
+        && let Some(base) = &base
+        && !git::worktree::ref_resolvable(base).map_err(WorkspaceError::GitError)?
+    {
+        return Err(WorkspaceError::BaseUnresolvedOffline { base: base.clone() }.into());
+    }
+
+    // Pre-create hooks run before the worktree is added so a failed check
+    // (e.g. `test -f package.json`) aborts creation and leaves nothing behind.
+    // The workspace does not exist yet, so they run from the main worktree.
+    // `--no-hooks` skips them.
+    if !opts.no_hooks && !policy.pre_create_hooks.is_empty() {
+        let vars = repo_config::HookVars {
+            workspace: dir_name.clone(),
+            workspace_path: path.clone(),
+            main_root: main_root.clone(),
+            branch: branch_name.clone(),
+        };
+        repo_config::run_hooks(&policy.pre_create_hooks, &vars, &main_root, true)?;
+    }
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(WorkspaceError::CreateDirFailed)?;
@@ -220,27 +368,40 @@ fn create_workspace(
 
     // When branching off the default remote branch, don't set it as upstream:
     // the new branch should push to its own name, not e.g. origin/main.
-    let no_track = default_base.is_some();
+    // --track overrides this so the remote base becomes the upstream.
+    let no_track = default_base.is_some() && !opts.track;
     git::worktree::add(
         &path,
         &branch_name,
         create_branch,
         base.as_deref(),
         no_track,
+        opts.detach,
     )
     .map_err(WorkspaceError::GitError)?;
 
     let path = path.canonicalize().unwrap_or(path);
 
-    if let Some(remote) = &tracking_remote {
+    if opts.detach {
+        eprintln!(
+            "Created workspace '{}' with detached HEAD{}",
+            dir_name,
+            base.as_deref()
+                .map(|b| format!(" at '{}'", b))
+                .unwrap_or_default()
+        );
+    } else if let Some(remote) = &tracking_remote {
         eprintln!(
             "Created workspace '{}' on new branch '{}' (tracking '{}')",
             dir_name, branch_name, remote
         );
     } else if let Some(default_base) = &default_base {
         eprintln!(
-            "Created workspace '{}' on new branch '{}' (from '{}')",
-            dir_name, branch_name, default_base
+            "Created workspace '{}' on new branch '{}' (from '{}'{})",
+            dir_name,
+            branch_name,
+            default_base,
+            if opts.track { ", tracking" } else { "" }
         );
     } else if create_branch {
         eprintln!(
@@ -255,13 +416,240 @@ fn create_workspace(
     }
     eprintln!("  {}", path.display());
 
-    if !no_setup {
-        let report =
-            repo_setup::run_setup_pipeline(&main_root, &path, &cfg.workspace.copy_files, true)?;
-        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
+    // Copy staged work from the source worktree into the new one. Runs
+    // independently of --no-setup: setup copies repo policy files, --from-staged
+    // copies the user's own staged changes.
+    if let Some(filter) = &opts.from_staged
+        && let Err(e) = copy_staged_into(filter, &path)
+    {
+        // No --keep-on-error flag yet: roll back the freshly created workspace
+        // so a failed extraction doesn't leave a half-built one.
+        let _ = git::worktree::remove(&main_root, &path, true);
+        return Err(e.into());
+    }
+
+    if !opts.no_setup {
+        // Use the resolved policy's copy_files so repo-shared/local copy files
+        // take effect alongside the global and personal sets. The pipeline also
+        // runs the personal profile's setup_script (unchanged).
+        let report = repo_setup::run_setup_pipeline(&main_root, &path, &policy.copy_files, true)?;
+        print_setup_report(&report, "  ", &policy.copy_files);
+
+        // The repo-config setup_script (from .gx) is resolved against main_root
+        // and runs with post-create semantics: a failure warns but keeps the
+        // workspace. The personal profile's script (run above) is left
+        // untouched. Avoid running the same script twice when both sources
+        // happen to point at the same file.
+        if let Some(repo_script) = repo_config_setup_script(&policy, &personal) {
+            run_repo_config_setup_script(&repo_script, &path, &main_root);
+        }
+    }
+
+    // Post-create hooks run after creation and setup, from inside the new
+    // workspace. A failure only warns and keeps the workspace. `--no-hooks`
+    // skips them.
+    if !opts.no_hooks && !policy.post_create_hooks.is_empty() {
+        let vars = repo_config::HookVars {
+            workspace: dir_name.clone(),
+            workspace_path: path.clone(),
+            main_root: main_root.clone(),
+            branch: branch_name.clone(),
+        };
+        repo_config::run_hooks(&policy.post_create_hooks, &vars, &path, false)?;
     }
 
     Ok(path)
+}
+
+/// The repo-config (`.gx`) setup script to run, if any, distinct from the
+/// personal profile's script (which `run_setup_pipeline` already runs). Returns
+/// `None` when the policy's script came from the personal profile or when the
+/// resolved path does not exist.
+fn repo_config_setup_script(
+    policy: &repo_config::WorkspacePolicy,
+    personal: &repo_setup::RepoSetupProfile,
+) -> Option<PathBuf> {
+    let resolved = policy.resolved_setup_script()?;
+
+    // If the resolved script lives under the personal profile dir, it was
+    // already run by run_setup_pipeline; don't run it again.
+    if resolved.starts_with(&personal.dir) {
+        return None;
+    }
+
+    if resolved.exists() { Some(resolved) } else { None }
+}
+
+/// Run a repo-config setup script with post-create semantics (warn on failure,
+/// keep workspace). Mirrors the env/stdio convention of the personal profile's
+/// script runner so stdout stays clean for the cd target.
+fn run_repo_config_setup_script(script: &Path, workspace_root: &Path, main_root: &Path) {
+    let stdout = match repo_setup::stderr_stdio() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("  warning: could not run setup script {}: {}", script.display(), e);
+            return;
+        }
+    };
+
+    eprintln!("  running setup script {}", script.display());
+    let status = std::process::Command::new("sh")
+        .arg(script)
+        .current_dir(workspace_root)
+        .env("GX_WORKSPACE_ROOT", workspace_root)
+        .env("GX_MAIN_ROOT", main_root)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(stdout)
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "  warning: setup script {} failed with status {}; continuing",
+            script.display(),
+            display_exit_status(&status)
+        ),
+        Err(e) => eprintln!(
+            "  warning: could not run setup script {}: {}",
+            script.display(),
+            e
+        ),
+    }
+}
+
+/// Copy staged file contents from the current (source) worktree's index into
+/// the new workspace at `dest_root`. When `filter` is non-empty, only the
+/// listed paths are copied (and any requested path not staged is warned about).
+/// Deleted entries are skipped with a warning since there is no content to copy.
+fn copy_staged_into(filter: &[String], dest_root: &Path) -> Result<(), WorkspaceError> {
+    use crate::git::worktree::StagedStatus;
+
+    let source_root =
+        git::worktree::current_worktree_root().map_err(WorkspaceError::GitError)?;
+    let entries = git::worktree::staged_entries(&source_root).map_err(WorkspaceError::GitError)?;
+
+    let filtering = !filter.is_empty();
+    let mut requested: HashSet<&str> = filter.iter().map(|s| s.as_str()).collect();
+
+    let selected: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            if !filtering {
+                return true;
+            }
+            // A filtered path matches either the current path or, for renames,
+            // the old path the user may still be thinking in terms of.
+            requested.remove(entry.path.as_str())
+                || match &entry.status {
+                    StagedStatus::Renamed { from } | StagedStatus::Copied { from } => {
+                        requested.remove(from.as_str())
+                    }
+                    _ => false,
+                }
+        })
+        .collect();
+
+    if filtering {
+        for missing in &requested {
+            eprintln!("warning: '{}' is not staged; skipping", missing);
+        }
+    }
+
+    let mut copied = 0usize;
+    for entry in selected {
+        if matches!(entry.status, StagedStatus::Deleted) {
+            eprintln!(
+                "warning: skipping deleted file '{}' (no content to copy)",
+                entry.path
+            );
+            continue;
+        }
+
+        let contents = git::worktree::show_staged(&source_root, &entry.path)
+            .map_err(WorkspaceError::GitError)?;
+        let dest = dest_root.join(&entry.path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(WorkspaceError::CopyFailed)?;
+        }
+        std::fs::write(&dest, &contents).map_err(WorkspaceError::CopyFailed)?;
+        eprintln!("  staged {}", entry.path);
+        copied += 1;
+    }
+
+    if copied == 0 {
+        eprintln!("  no staged file contents to copy");
+    }
+
+    Ok(())
+}
+
+/// When the target `path` already hosts a registered worktree on a different
+/// branch, offer a safe branch switch instead of erroring on the existing path:
+/// - target branch checked out in another worktree -> navigate there instead
+///   (doesn't touch the existing worktree, so its dirty state is irrelevant);
+/// - dirty worktree -> refuse the switch;
+/// - target branch exists locally and is free -> switch this worktree to it.
+///
+/// Returns `Some(path)` when the situation was handled (and shell navigation,
+/// if any, was already emitted), or `None` to fall through to normal creation.
+fn try_switch_existing(
+    worktrees: &[Worktree],
+    path: &Path,
+    branch_name: &str,
+    opts: &NewWorkspaceOptions,
+) -> Result<Option<PathBuf>> {
+    // Only relevant when the exact target path is already a registered worktree.
+    let Some(existing) = worktrees.iter().find(|w| paths_equal(&w.path, path)) else {
+        return Ok(None);
+    };
+
+    // Detached HEAD, or already on the requested branch: not a switch case.
+    if existing.branch.as_deref() == Some(branch_name) {
+        return Ok(None);
+    }
+    // --detach has no target branch to switch to; let normal handling run.
+    if opts.detach {
+        return Ok(None);
+    }
+
+    // The target branch is checked out elsewhere: git won't allow a second
+    // checkout of it, so send the user to that workspace instead. This is
+    // checked first because navigation leaves the existing worktree untouched,
+    // so its dirty state doesn't matter here. Navigation is emitted by the
+    // single caller (`run_new`) using the returned path; this helper only
+    // performs the git-side switch and reports it on stderr.
+    if let Some(other) = worktrees
+        .iter()
+        .find(|w| w.branch.as_deref() == Some(branch_name) && !paths_equal(&w.path, path))
+    {
+        eprintln!(
+            "Branch '{}' is already checked out in workspace '{}'",
+            branch_name, other.name
+        );
+        let target = other.path.clone();
+        return Ok(Some(target.canonicalize().unwrap_or(target)));
+    }
+
+    // The target branch must already exist locally to switch to it; otherwise
+    // fall through so creation can make it.
+    if !git::worktree::branch_exists(branch_name).map_err(WorkspaceError::GitError)? {
+        return Ok(None);
+    }
+
+    // Switching would carry over the working tree, so refuse on uncommitted
+    // changes to avoid surprising the user.
+    if git::worktree::has_tracked_changes(&existing.path).map_err(WorkspaceError::GitError)? {
+        return Err(WorkspaceError::Dirty(existing.name.clone()).into());
+    }
+
+    git::worktree::switch_branch(&existing.path, branch_name).map_err(WorkspaceError::GitError)?;
+    eprintln!(
+        "Switched workspace '{}' to branch '{}'",
+        existing.name, branch_name
+    );
+    let target = existing.path.clone();
+    Ok(Some(target.canonicalize().unwrap_or(target)))
 }
 
 /// Resolve a workspace by query (or interactively) and print its path to
@@ -553,6 +941,53 @@ pub fn run_sync(
     Ok(())
 }
 
+/// Print the main worktree root to STDOUT, for use in scripts and aliases:
+/// `cd "$(gx workspace root)"`. Unlike the navigation commands this is a plain
+/// value command, so it emits the canonical path on stdout with no stderr hint.
+pub fn run_root() -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let main_root = main_worktree_root(&worktrees)?;
+    let canonical = main_root.canonicalize().unwrap_or(main_root);
+    println!("{}", canonical.display());
+    Ok(())
+}
+
+/// Move a workspace to a new path via `git worktree move`. Refuses the main
+/// worktree and refuses an existing destination. Human-readable output goes to
+/// stderr; nothing is written to stdout unless the CURRENT workspace is moved,
+/// in which case the new path is emitted via [`print_go_path`] so the shell
+/// wrapper follows the user into it (mirroring the current-workspace handling
+/// in [`remove_worktrees`]).
+pub fn run_move(workspace: String, new_path: String) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let target = fuzzy_match_worktree(&workspace, &worktrees)
+        .ok_or_else(|| WorkspaceError::NoMatch(workspace.clone()))?;
+
+    if target.is_main {
+        return Err(WorkspaceError::MoveMain.into());
+    }
+
+    let cwd = std::env::current_dir().map_err(WorkspaceError::CopyFailed)?;
+    let dest = resolve_dest_path(&new_path, home_dir().as_deref(), &cwd);
+
+    if dest.exists() {
+        return Err(WorkspaceError::DestinationExists(dest).into());
+    }
+
+    let main_root = main_worktree_root(&worktrees)?;
+    git::worktree::move_worktree(&main_root, &target.path, &dest)
+        .map_err(WorkspaceError::GitError)?;
+
+    eprintln!("Moved workspace '{}' to {}", target.name, dest.display());
+
+    if target.is_current {
+        eprintln!("Switching to moved workspace");
+        print_go_path(&dest);
+    }
+
+    Ok(())
+}
+
 /// Best-effort human-readable name for a worktree root, used only in messages.
 /// Falls back to the final path component when the root is not a registered
 /// worktree (e.g. a bare absolute path).
@@ -566,6 +1001,71 @@ fn worktree_display_name(root: &Path, worktrees: &[Worktree]) -> String {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| root.display().to_string())
         })
+}
+
+/// Lock a workspace so cleanup and `git worktree prune` skip it. Refuses the
+/// main worktree (git itself errors on locking it). Output goes to stderr only.
+pub fn run_lock(workspace: String, reason: Option<String>) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let target = fuzzy_match_worktree(&workspace, &worktrees)
+        .ok_or_else(|| WorkspaceError::NoMatch(workspace.clone()))?;
+
+    if target.is_main {
+        return Err(WorkspaceError::LockMain.into());
+    }
+
+    let main_root = main_worktree_root(&worktrees)?;
+    git::worktree::lock(&main_root, &target.path, reason.as_deref())
+        .map_err(WorkspaceError::GitError)?;
+
+    eprintln!(
+        "Locked workspace '{}'{}",
+        target.name,
+        reason.map(|r| format!(" ({})", r)).unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// Clear the lock on a previously locked workspace. Output goes to stderr only.
+pub fn run_unlock(workspace: String) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let target = fuzzy_match_worktree(&workspace, &worktrees)
+        .ok_or_else(|| WorkspaceError::NoMatch(workspace.clone()))?;
+
+    let main_root = main_worktree_root(&worktrees)?;
+    git::worktree::unlock(&main_root, &target.path).map_err(WorkspaceError::GitError)?;
+
+    eprintln!("Unlocked workspace '{}'", target.name);
+    Ok(())
+}
+
+/// Repair worktree administrative files. With a workspace query, repairs only
+/// that worktree; with no query, repairs all of them. Recovery command, so
+/// output goes to stderr only. Mostly useful after a worktree directory or the
+/// main repository has been moved on disk.
+pub fn run_repair(workspace: Option<String>) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let main_root = main_worktree_root(&worktrees)?;
+
+    let paths: Vec<PathBuf> = match &workspace {
+        Some(q) => {
+            let target = fuzzy_match_worktree(q, &worktrees)
+                .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?;
+            vec![target.path]
+        }
+        None => Vec::new(),
+    };
+
+    git::worktree::repair(&main_root, &paths).map_err(WorkspaceError::GitError)?;
+
+    match paths.as_slice() {
+        [path] => eprintln!(
+            "Repaired worktree administrative files for {}",
+            path.display()
+        ),
+        _ => eprintln!("Repaired worktree administrative files"),
+    }
+    Ok(())
 }
 
 /// Interactive workspace manager (default when no subcommand is given).
@@ -636,7 +1136,7 @@ fn create_from_picker(name: String) -> Result<()> {
         return Ok(());
     }
 
-    run_new(name, None, None, false)
+    run_new(name, NewWorkspaceOptions::default())
 }
 
 /// Open a workspace in the user's editor, resolved from `$VISUAL`, then
@@ -774,7 +1274,9 @@ fn setup_worktrees(worktrees_to_setup: &[Worktree], all_worktrees: &[Worktree]) 
     }
 
     let main_root = main_worktree_root(all_worktrees)?;
-    let cfg = config::load()?;
+    // `gx workspace setup` applies the configured policy, so it honors the
+    // shared repo config too. Hooks are only run on create, not setup.
+    let policy = repo_config::resolve_for_repo(&main_root)?;
 
     for target in &targets {
         if paths_equal(&main_root, &target.path) {
@@ -785,15 +1287,11 @@ fn setup_worktrees(worktrees_to_setup: &[Worktree], all_worktrees: &[Worktree]) 
             continue;
         }
 
-        let report = repo_setup::run_setup_pipeline(
-            &main_root,
-            &target.path,
-            &cfg.workspace.copy_files,
-            true,
-        )?;
+        let report =
+            repo_setup::run_setup_pipeline(&main_root, &target.path, &policy.copy_files, true)?;
 
         eprintln!("Setup for '{}':", target.name);
-        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
+        print_setup_report(&report, "  ", &policy.copy_files);
     }
 
     Ok(())
@@ -1058,17 +1556,7 @@ fn workspace_path(
 
     let root = root_template.replace("{repo}", &repo_name);
 
-    let root_path = if let Some(home) = home {
-        if root == "~" {
-            home.to_path_buf()
-        } else if let Some(rest) = root.strip_prefix("~/") {
-            home.join(rest)
-        } else {
-            PathBuf::from(&root)
-        }
-    } else {
-        PathBuf::from(&root)
-    };
+    let root_path = expand_home(&root, home);
 
     let base = if root_path.is_absolute() {
         root_path
@@ -1077,6 +1565,31 @@ fn workspace_path(
     };
 
     base.join(name)
+}
+
+/// Expand a leading '~' (or '~/...') in `path` against `home`. When `home` is
+/// unknown the '~' is left untouched and treated as a literal path component.
+fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
+    match home {
+        Some(home) if path == "~" => home.to_path_buf(),
+        Some(home) => match path.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => PathBuf::from(path),
+        },
+        None => PathBuf::from(path),
+    }
+}
+
+/// Resolve a user-supplied move destination to an absolute path: expand a
+/// leading '~', then make relative paths absolute against the current working
+/// directory (matching `git worktree move`'s own relative-path behavior).
+fn resolve_dest_path(input: &str, home: Option<&Path>, cwd: &Path) -> PathBuf {
+    let expanded = expand_home(input, home);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -1202,6 +1715,46 @@ mod tests {
         // without a home dir, "~/..." is treated as a relative path
         let path = workspace_path(Path::new("/repo"), None, "~/ws", "fix");
         assert_eq!(path, PathBuf::from("/repo/~/ws/fix"));
+    }
+
+    #[test]
+    fn test_expand_home() {
+        let home = Path::new("/home/user");
+        assert_eq!(expand_home("~", Some(home)), PathBuf::from("/home/user"));
+        assert_eq!(
+            expand_home("~/ws/feat", Some(home)),
+            PathBuf::from("/home/user/ws/feat")
+        );
+        // A bare absolute path is untouched.
+        assert_eq!(expand_home("/srv/ws", Some(home)), PathBuf::from("/srv/ws"));
+        // Without a home dir, '~' stays literal.
+        assert_eq!(expand_home("~/ws", None), PathBuf::from("~/ws"));
+    }
+
+    #[test]
+    fn test_resolve_dest_path() {
+        let home = Path::new("/home/user");
+        let cwd = Path::new("/work/cwd");
+
+        // Absolute destination is used as-is.
+        assert_eq!(
+            resolve_dest_path("/srv/ws/moved", Some(home), cwd),
+            PathBuf::from("/srv/ws/moved")
+        );
+        // '~' expands to home and stays absolute.
+        assert_eq!(
+            resolve_dest_path("~/ws/moved", Some(home), cwd),
+            PathBuf::from("/home/user/ws/moved")
+        );
+        // A relative destination resolves against the current working dir.
+        assert_eq!(
+            resolve_dest_path("moved", Some(home), cwd),
+            PathBuf::from("/work/cwd/moved")
+        );
+        assert_eq!(
+            resolve_dest_path("../sibling", Some(home), cwd),
+            PathBuf::from("/work/cwd/../sibling")
+        );
     }
 
     #[test]
