@@ -1,6 +1,52 @@
 use crate::commands;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::Result;
+
+/// Shells `gx setup` can generate integration for. A local enum (rather than
+/// re-exporting `clap_complete::Shell`) keeps the advertised set to the three
+/// shells we actually support; `to_clap_complete` maps to the wider enum for
+/// static completion generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ShellKind {
+    Zsh,
+    Bash,
+    Fish,
+}
+
+impl ShellKind {
+    pub fn to_clap_complete(self) -> clap_complete::Shell {
+        match self {
+            ShellKind::Zsh => clap_complete::Shell::Zsh,
+            ShellKind::Bash => clap_complete::Shell::Bash,
+            ShellKind::Fish => clap_complete::Shell::Fish,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShellKind::Zsh => "zsh",
+            ShellKind::Bash => "bash",
+            ShellKind::Fish => "fish",
+        }
+    }
+}
+
+/// Kinds of dynamic completion candidates the generated shell helpers can
+/// request via the hidden `gx __complete <kind>` invocation.
+///
+/// `__complete` is intentionally NOT a clap subcommand: clap_complete emits
+/// every subcommand (even `hide = true` ones) into the static completion
+/// script, which would surface the internal helper as a visible `gx <TAB>`
+/// candidate. Instead `main` intercepts `__complete <kind>` before clap parses,
+/// keeping it out of the command tree entirely while still backing the
+/// generated dynamic completion helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompleteKind {
+    Workspaces,
+    Branches,
+    RemoteBranches,
+    Stashes,
+}
 
 #[derive(Parser)]
 #[command(name = "gx", about = "GX - Smart Git CLI", version)]
@@ -101,8 +147,24 @@ pub enum Commands {
     #[command(alias = "onboard")]
     Onboarding,
 
-    /// Generate shell aliases from config
-    Setup,
+    /// Generate shell aliases, the cd wrapper, and completions
+    Setup {
+        /// Shell to generate integration for (auto-detected from $SHELL when omitted)
+        #[arg(long, value_enum)]
+        shell: Option<ShellKind>,
+
+        /// Emit only the static completion script for the given shell, then exit
+        #[arg(long, value_enum)]
+        completions: Option<ShellKind>,
+
+        /// Name of the generated wrapper function/alias prefix (default: gx)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Path/name of the real gx binary the wrapper invokes (default: gx)
+        #[arg(long)]
+        command: Option<String>,
+    },
 
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
@@ -292,7 +354,12 @@ impl Commands {
                 None => commands::pr::run_interactive(),
                 Some(PrCommands::List) => commands::pr::run_list(),
             },
-            Commands::Setup => commands::setup::run(),
+            Commands::Setup {
+                shell,
+                completions,
+                name,
+                command,
+            } => commands::setup::run(shell, completions, name, command),
         }
     }
 }
