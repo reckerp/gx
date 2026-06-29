@@ -1391,7 +1391,7 @@ fn remove_worktrees(
             Ok(()) => {}
             // copied setup files (e.g. .env) are untracked, so offer a force
             // removal instead of failing outright
-            Err(GitError::CommandFailed(msg))
+            Err(GitError::CommandFailed { stderr: msg, .. })
                 if !use_force && msg.contains("contains modified or untracked files") =>
             {
                 if !confirm_force_remove(worktree)? {
@@ -1444,11 +1444,11 @@ pub(crate) fn delete_local_branch(main_root: &Path, branch: &str) -> Result<()> 
         Ok(()) => Ok(()),
         // The branch is already gone (e.g. removed earlier in the same cleanup
         // run): treat that as success rather than aborting the whole operation.
-        Err(GitError::CommandFailed(msg)) if msg.contains("not found") => {
+        Err(GitError::CommandFailed { stderr: msg, .. }) if msg.contains("not found") => {
             eprintln!("Branch '{}' was already deleted", branch);
             Ok(())
         }
-        Err(GitError::CommandFailed(msg)) if msg.contains("not fully merged") => {
+        Err(GitError::CommandFailed { stderr: msg, .. }) if msg.contains("not fully merged") => {
             let confirmed = ui::confirm::run_on_stderr(&format!(
                 "Branch '{}' is not fully merged. Force delete it?",
                 branch

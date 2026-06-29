@@ -139,11 +139,7 @@ pub fn default_remote_branch() -> Result<Option<String>, GitError> {
 }
 
 pub fn checkout_branch(branch_name: &str) -> Result<(), GitError> {
-    git_exec::exec(
-        vec!["checkout".to_string(), branch_name.to_string()],
-        ExecOptions::default(),
-    )?;
-
+    git_exec::exec(["checkout", branch_name], ExecOptions::default())?;
     Ok(())
 }
 

@@ -41,9 +41,17 @@ pub enum GitError {
     #[diagnostic(code(gx::git::not_on_branch))]
     NotOnBranch,
 
-    #[error("Git command failed: {0}")]
+    #[error("pathspec '{0}' did not match any files")]
+    #[diagnostic(code(gx::git::pathspec_not_found))]
+    PathspecNotFound(String),
+
+    #[error("Stash not found: stash@{{{0}}}")]
+    #[diagnostic(code(gx::git::stash_not_found))]
+    StashNotFound(usize),
+
+    #[error("Git command failed: {stderr}")]
     #[diagnostic(code(gx::git::command_failed))]
-    CommandFailed(String),
+    CommandFailed { stderr: String, code: Option<i32> },
 
     #[error("{0}")]
     #[diagnostic(code(gx::git::git2_error))]

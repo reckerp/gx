@@ -6,25 +6,13 @@ use crate::git::{
 use miette::Result;
 
 pub fn fetch() -> Result<(), GitError> {
-    git_exec::exec(
-        vec!["fetch".to_string()],
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
-    )?;
+    git_exec::exec(["fetch"], ExecOptions::silent())?;
     Ok(())
 }
 
 /// Fetch a specific remote (e.g. "origin") to refresh its remote-tracking refs.
 pub fn fetch_remote(remote: &str) -> Result<(), GitError> {
-    git_exec::exec(
-        vec!["fetch".to_string(), remote.to_string()],
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
-    )?;
+    git_exec::exec(["fetch", remote], ExecOptions::silent())?;
     Ok(())
 }
 

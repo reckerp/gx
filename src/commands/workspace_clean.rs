@@ -335,7 +335,7 @@ fn apply_clean_action(action: &CleanAction, main_root: &Path) -> Result<()> {
         eprintln!("Removing workspace '{}'...", worktree.name);
         match git::worktree::remove(main_root, &worktree.path, false) {
             Ok(()) => {}
-            Err(GitError::CommandFailed(msg))
+            Err(GitError::CommandFailed { stderr: msg, .. })
                 if msg.contains("contains modified or untracked files") =>
             {
                 let confirmed = ui::confirm::run_on_stderr(&format!(

@@ -129,17 +129,7 @@ impl Worktree {
 
 /// List all worktrees of the repository. The main worktree is always first.
 pub fn list() -> Result<Vec<Worktree>, GitError> {
-    let output = git_exec::exec(
-        vec![
-            "worktree".to_string(),
-            "list".to_string(),
-            "--porcelain".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
-    )?;
+    let output = git_exec::exec(["worktree", "list", "--porcelain"], ExecOptions::capture())?;
 
     let current_root = current_worktree_root().ok();
     Ok(parse_porcelain(&output, current_root.as_deref()))
@@ -157,15 +147,8 @@ pub fn current_worktree_root() -> Result<PathBuf, GitError> {
 /// worktrees from the same repository return the same common directory.
 pub fn common_git_dir() -> Result<PathBuf, GitError> {
     let output = git_exec::exec(
-        vec![
-            "rev-parse".to_string(),
-            "--path-format=absolute".to_string(),
-            "--git-common-dir".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ExecOptions::capture(),
     )?;
 
     Ok(PathBuf::from(output))
@@ -216,10 +199,7 @@ pub fn add(
 
     git_exec::exec(
         args,
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
+        ExecOptions::silent(),
     )?;
 
     Ok(())
@@ -248,19 +228,10 @@ pub enum StagedStatus {
 /// NUL-delimited porcelain output (NUL-delimited keeps paths unambiguous and
 /// gives rename/copy entries their old+new path as separate fields).
 pub fn staged_entries(root: &Path) -> Result<Vec<StagedEntry>, GitError> {
-    let output = git_exec::exec(
-        vec![
-            "-C".to_string(),
-            root.display().to_string(),
-            "diff".to_string(),
-            "--cached".to_string(),
-            "--name-status".to_string(),
-            "-z".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+    let output = git_exec::exec_in(
+        root,
+        &["diff", "--cached", "--name-status", "-z"],
+        ExecOptions::capture(),
     )?;
     Ok(parse_name_status(&output))
 }
@@ -315,18 +286,8 @@ fn parse_name_status(out: &str) -> Vec<StagedEntry> {
 /// `git -C <root> show :<path>`. Returns raw bytes so binary and
 /// whitespace-significant files round-trip exactly.
 pub fn show_staged(root: &Path, path: &str) -> Result<Vec<u8>, GitError> {
-    git_exec::exec_bytes(
-        vec![
-            "-C".to_string(),
-            root.display().to_string(),
-            "show".to_string(),
-            format!(":{}", path),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
-    )
+    let spec = format!(":{}", path);
+    git_exec::exec_bytes_in(root, &["show", &spec], ExecOptions::capture())
 }
 
 /// Switch the worktree at `path` to an existing local `branch`
@@ -335,18 +296,7 @@ pub fn show_staged(root: &Path, path: &str) -> Result<Vec<u8>, GitError> {
 /// `switch` (rather than `checkout <branch>`) only ever resolves a branch,
 /// never a pathspec, so a `--` separator is unnecessary and would misparse.
 pub fn switch_branch(path: &Path, branch: &str) -> Result<(), GitError> {
-    git_exec::exec(
-        vec![
-            "-C".to_string(),
-            path.display().to_string(),
-            "switch".to_string(),
-            branch.to_string(),
-        ],
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
-    )?;
+    git_exec::exec_in(path, &["switch", branch], ExecOptions::silent())?;
     Ok(())
 }
 
@@ -354,22 +304,16 @@ pub fn switch_branch(path: &Path, branch: &str) -> Result<(), GitError> {
 /// (`git rev-parse --verify --quiet <base>^{commit}`). Used to give a targeted
 /// offline diagnostic when `--no-fetch` is set before calling [`add`].
 pub fn ref_resolvable(base: &str) -> Result<bool, GitError> {
+    let spec = format!("{}^{{commit}}", base);
     match git_exec::exec(
-        vec![
-            "rev-parse".to_string(),
-            "--verify".to_string(),
-            "--quiet".to_string(),
-            format!("{}^{{commit}}", base),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+        ["rev-parse", "--verify", "--quiet", &spec],
+        ExecOptions::capture(),
     ) {
         Ok(out) => Ok(!out.trim().is_empty()),
         // rev-parse --verify --quiet exits non-zero with no stderr when the ref
-        // is unknown; treat that as "not resolvable" rather than a hard error.
-        Err(GitError::CommandFailed(msg)) if msg.trim().is_empty() => Ok(false),
+        // is unknown; treat that (non-zero exit + empty stderr) as "not
+        // resolvable" rather than a hard error.
+        Err(GitError::CommandFailed { stderr, code: Some(_) }) if stderr.is_empty() => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -380,15 +324,8 @@ pub fn ref_resolvable(base: &str) -> Result<bool, GitError> {
 /// first existing branch that conflicts with `branch_name`, if any.
 pub fn conflicting_branch(branch_name: &str) -> Result<Option<String>, GitError> {
     let output = git_exec::exec(
-        vec![
-            "for-each-ref".to_string(),
-            "--format=%(refname:short)".to_string(),
-            "refs/heads".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+        ["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        ExecOptions::capture(),
     )?;
 
     let existing: Vec<String> = output
@@ -423,37 +360,17 @@ fn is_path_prefix(prefix: &str, name: &str) -> bool {
 /// Rebase the branch checked out in the worktree at `path` onto `base`
 /// (e.g. 'origin/main'). Runs in the worktree via 'git -C'.
 pub fn rebase_onto(path: &Path, base: &str) -> Result<(), GitError> {
-    git_exec::exec(
-        vec![
-            "-C".to_string(),
-            path.display().to_string(),
-            "rebase".to_string(),
-            "--".to_string(),
-            base.to_string(),
-        ],
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
-    )?;
+    git_exec::exec_in(path, &["rebase", "--", base], ExecOptions::silent())?;
     Ok(())
 }
 
 /// True when the worktree at `path` has staged or unstaged changes to
 /// tracked files (untracked files don't block a rebase, so they're ignored).
 pub fn has_tracked_changes(path: &Path) -> Result<bool, GitError> {
-    let output = git_exec::exec(
-        vec![
-            "-C".to_string(),
-            path.display().to_string(),
-            "status".to_string(),
-            "--porcelain".to_string(),
-            "--untracked-files=no".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+    let output = git_exec::exec_in(
+        path,
+        &["status", "--porcelain", "--untracked-files=no"],
+        ExecOptions::capture(),
     )?;
     Ok(!output.trim().is_empty())
 }
@@ -462,44 +379,25 @@ pub fn has_tracked_changes(path: &Path) -> Result<bool, GitError> {
 /// so removal works even when the process is inside the worktree being
 /// removed (git refuses to remove its own current worktree).
 pub fn remove(from: &Path, path: &Path, force: bool) -> Result<(), GitError> {
-    let mut args = vec![
-        "-C".to_string(),
-        from.display().to_string(),
-        "worktree".to_string(),
-        "remove".to_string(),
-    ];
+    let path = path.display().to_string();
+    let mut args = vec!["worktree", "remove"];
     if force {
-        args.push("--force".to_string());
+        args.push("--force");
     }
-    args.push("--".to_string());
-    args.push(path.display().to_string());
+    args.push("--");
+    args.push(&path);
 
-    git_exec::exec(
-        args,
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
-    )?;
+    git_exec::exec_in(from, &args, ExecOptions::silent())?;
 
     Ok(())
 }
 
 pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), GitError> {
     let delete_flag = if force { "-D" } else { "-d" };
-    git_exec::exec(
-        vec![
-            "-C".to_string(),
-            from.display().to_string(),
-            "branch".to_string(),
-            delete_flag.to_string(),
-            "--".to_string(),
-            branch_name.to_string(),
-        ],
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
+    git_exec::exec_in(
+        from,
+        &["branch", delete_flag, "--", branch_name],
+        ExecOptions::silent(),
     )?;
     Ok(())
 }
@@ -510,10 +408,7 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
 pub fn move_worktree(from: &Path, path: &Path, new_path: &Path) -> Result<(), GitError> {
     git_exec::exec(
         move_worktree_args(from, path, new_path),
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
+        ExecOptions::silent(),
     )?;
     Ok(())
 }
@@ -524,10 +419,7 @@ pub fn move_worktree(from: &Path, path: &Path, new_path: &Path) -> Result<(), Gi
 pub fn lock(from: &Path, path: &Path, reason: Option<&str>) -> Result<(), GitError> {
     git_exec::exec(
         lock_args(from, path, reason),
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
+        ExecOptions::silent(),
     )?;
     Ok(())
 }
@@ -537,10 +429,7 @@ pub fn lock(from: &Path, path: &Path, reason: Option<&str>) -> Result<(), GitErr
 pub fn unlock(from: &Path, path: &Path) -> Result<(), GitError> {
     git_exec::exec(
         unlock_args(from, path),
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
+        ExecOptions::silent(),
     )?;
     Ok(())
 }
@@ -553,10 +442,7 @@ pub fn unlock(from: &Path, path: &Path) -> Result<(), GitError> {
 pub fn repair(from: &Path, paths: &[PathBuf]) -> Result<(), GitError> {
     git_exec::exec(
         repair_args(from, paths),
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
+        ExecOptions::silent(),
     )?;
     Ok(())
 }
@@ -753,18 +639,8 @@ pub fn apply_pull_requests(
 }
 
 pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
-    let status_output = git_exec::exec(
-        vec![
-            "-C".to_string(),
-            worktree.path.display().to_string(),
-            "status".to_string(),
-            "--porcelain".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
-    )?;
+    let status_output =
+        git_exec::exec_in(&worktree.path, &["status", "--porcelain"], ExecOptions::capture())?;
 
     let (tracked_changes, untracked_changes) = parse_status_counts(&status_output);
     let (ahead, behind) = match worktree.branch {
@@ -803,19 +679,10 @@ fn ahead_behind(path: &Path) -> Result<(Option<usize>, Option<usize>), GitError>
     // rev-list itself fails when the branch has no upstream, and the caller
     // treats any error here as "no ahead/behind info", so a separate
     // rev-parse @{upstream} existence check would just be a wasted git spawn.
-    let output = git_exec::exec(
-        vec![
-            "-C".to_string(),
-            path.display().to_string(),
-            "rev-list".to_string(),
-            "--left-right".to_string(),
-            "--count".to_string(),
-            "@{upstream}...HEAD".to_string(),
-        ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+    let output = git_exec::exec_in(
+        path,
+        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        ExecOptions::capture(),
     )?;
 
     let mut counts = output.split_whitespace();
@@ -963,10 +830,7 @@ pub fn remote_gone_branches() -> Result<Vec<String>, GitError> {
             "--format=%(refname:short) %(upstream:track)".to_string(),
             "refs/heads".to_string(),
         ],
-        ExecOptions {
-            capture: true,
-            ..Default::default()
-        },
+        ExecOptions::capture(),
     )?;
 
     Ok(parse_gone_branches(&output))
@@ -994,18 +858,7 @@ fn parse_gone_branches(output: &str) -> Vec<String> {
 /// Run `git worktree prune` from `from` (the main worktree) to drop metadata for
 /// worktrees whose directories no longer exist.
 pub fn prune_metadata(from: &Path) -> Result<(), GitError> {
-    git_exec::exec(
-        vec![
-            "-C".to_string(),
-            from.display().to_string(),
-            "worktree".to_string(),
-            "prune".to_string(),
-        ],
-        ExecOptions {
-            silent: true,
-            ..Default::default()
-        },
-    )?;
+    git_exec::exec_in(from, &["worktree", "prune"], ExecOptions::silent())?;
     Ok(())
 }
 
