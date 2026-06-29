@@ -149,11 +149,15 @@ pub fn add(
         }
         args.push("-b".to_string());
         args.push(branch.to_string());
+        // End option parsing so a path or base beginning with '-' is never read
+        // as a flag.
+        args.push("--".to_string());
         args.push(path.display().to_string());
         if let Some(base) = base {
             args.push(base.to_string());
         }
     } else {
+        args.push("--".to_string());
         args.push(path.display().to_string());
         args.push(branch.to_string());
     }
@@ -177,6 +181,7 @@ pub fn rebase_onto(path: &Path, base: &str) -> Result<(), GitError> {
             "-C".to_string(),
             path.display().to_string(),
             "rebase".to_string(),
+            "--".to_string(),
             base.to_string(),
         ],
         ExecOptions {
@@ -219,6 +224,7 @@ pub fn remove(from: &Path, path: &Path, force: bool) -> Result<(), GitError> {
     if force {
         args.push("--force".to_string());
     }
+    args.push("--".to_string());
     args.push(path.display().to_string());
 
     git_exec::exec(
@@ -240,6 +246,7 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
             from.display().to_string(),
             "branch".to_string(),
             delete_flag.to_string(),
+            "--".to_string(),
             branch_name.to_string(),
         ],
         ExecOptions {

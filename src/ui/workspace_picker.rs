@@ -1,4 +1,4 @@
-use super::{TermStderr, render_help_bar};
+use super::{TermStderr, adjust_scroll, render_help_bar};
 use crate::git::pull_request::{PullRequestLookup, PullRequestState, PullRequestStatus};
 use crate::git::worktree::{Worktree, WorktreeSummary, apply_pull_requests};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -422,20 +422,6 @@ fn toggle_visible_selection(worktrees: &[Worktree], selected_paths: &mut HashSet
     }
 }
 
-fn adjust_scroll(selected: usize, scroll_offset: usize, visible_height: usize) -> usize {
-    if visible_height == 0 {
-        return scroll_offset;
-    }
-
-    if selected >= scroll_offset + visible_height {
-        selected.saturating_sub(visible_height - 1)
-    } else if selected < scroll_offset {
-        selected
-    } else {
-        scroll_offset
-    }
-}
-
 fn visible_range(total: usize, scroll_offset: usize, visible_height: usize) -> String {
     if total == 0 || visible_height == 0 {
         return "0 shown".to_string();
@@ -802,7 +788,7 @@ pub fn run(
                             selected_index = 0;
                             scroll_offset = 0;
                         }
-                        (KeyCode::Char(c), _) => {
+                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                             query.push(c);
                             selected_index = 0;
                             scroll_offset = 0;
@@ -995,13 +981,6 @@ mod tests {
         summaries.insert(pending.path.clone(), WorktreeSummary::default());
 
         assert!(pr_urls_for_targets(&[pending], &summaries).is_empty());
-    }
-
-    #[test]
-    fn test_adjust_scroll_keeps_selection_visible() {
-        assert_eq!(adjust_scroll(0, 0, 5), 0);
-        assert_eq!(adjust_scroll(5, 0, 5), 1);
-        assert_eq!(adjust_scroll(2, 5, 5), 2);
     }
 
     #[test]

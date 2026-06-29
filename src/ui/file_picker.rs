@@ -1,4 +1,4 @@
-use super::{Term, render_help_bar, status_char, status_color};
+use super::{Term, adjust_scroll, render_help_bar, status_char, status_color};
 use crate::git::status::StatusFile;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use miette::IntoDiagnostic;
@@ -27,6 +27,7 @@ pub fn run(
     }
 
     let mut selected_index = 0;
+    let mut scroll_offset = 0;
     let mut selected_files: HashSet<usize> = all_files
         .iter()
         .enumerate()
@@ -51,9 +52,14 @@ pub fn run(
                     .constraints([Constraint::Min(0), Constraint::Length(3)])
                     .split(area);
 
+                let visible_height = chunks[0].height.saturating_sub(2) as usize;
+                scroll_offset = adjust_scroll(selected_index, scroll_offset, visible_height);
+
                 let items: Vec<ListItem> = all_files
                     .iter()
                     .enumerate()
+                    .skip(scroll_offset)
+                    .take(visible_height)
                     .map(|(i, (file, is_staged))| {
                         let is_selected = selected_files.contains(&i);
                         let checkbox = if is_selected { "[x]" } else { "[ ]" };

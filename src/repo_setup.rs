@@ -276,7 +276,7 @@ fn parse_repo_config(path: &Path, content: &str) -> Result<RepoSetupConfig> {
                 return Err(parse_error(path, line_idx, "expected '=' after copy_files"));
             };
             let mut array = rest.trim().to_string();
-            while !array.contains(']') {
+            while !array_terminated(&array) {
                 let Some((_, next)) = lines.next() else {
                     return Err(parse_error(path, line_idx, "unterminated copy_files array"));
                 };
@@ -310,6 +310,30 @@ fn parse_error(path: &Path, line_idx: usize, message: &str) -> miette::Report {
     )
 }
 
+/// True once `s` contains a `]` that closes the array, i.e. one that sits
+/// outside any quoted string. A bare `contains(']')` would stop accumulating at
+/// a `]` embedded in a quoted path entry, silently dropping later entries.
+fn array_terminated(s: &str) -> bool {
+    let mut in_quote = false;
+    let mut escaped = false;
+    for ch in s.chars() {
+        if in_quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_quote = false;
+            }
+        } else if ch == '"' {
+            in_quote = true;
+        } else if ch == ']' {
+            return true;
+        }
+    }
+    false
+}
+
 fn extract_quoted_strings(input: &str) -> Vec<String> {
     let mut strings = Vec::new();
     let mut chars = input.chars();
@@ -328,6 +352,7 @@ fn extract_quoted_strings(input: &str) -> Vec<String> {
                     '\\' => value.push('\\'),
                     'n' => value.push('\n'),
                     't' => value.push('\t'),
+                    'r' => value.push('\r'),
                     other => value.push(other),
                 }
                 escaped = false;
@@ -345,8 +370,23 @@ fn extract_quoted_strings(input: &str) -> Vec<String> {
     strings
 }
 
+/// Escape a value for a TOML basic string. Newlines, tabs and carriage returns
+/// must be escaped (an unescaped newline ends the string for the reader and
+/// corrupts the round-trip); the decode side in `extract_quoted_strings` mirrors
+/// these escapes exactly.
 fn escape_toml_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn dedupe(values: &mut Vec<String>) {
@@ -581,12 +621,24 @@ fn run_setup_script(
     }
 }
 
+/// Stdio that sends the setup script's stdout to gx's stderr, keeping gx's own
+/// stdout clean (it carries the cd target path the shell wrapper consumes).
+/// Prefers `/dev/stderr`, but falls back to a duplicate of the real stderr fd so
+/// a missing/unwritable `/dev/stderr` doesn't abort an otherwise-runnable script.
 fn stderr_stdio() -> Result<Stdio> {
-    let file = OpenOptions::new()
-        .write(true)
-        .open("/dev/stderr")
-        .into_diagnostic()?;
-    Ok(Stdio::from(file))
+    if let Ok(file) = OpenOptions::new().write(true).open("/dev/stderr") {
+        return Ok(Stdio::from(file));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        if let Ok(owned) = std::io::stderr().as_fd().try_clone_to_owned() {
+            return Ok(Stdio::from(owned));
+        }
+    }
+
+    Ok(Stdio::inherit())
 }
 
 fn make_executable(path: &Path) -> Result<()> {
@@ -719,5 +771,43 @@ mod tests {
         assert!(!dst.join("missing.txt").exists());
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_array_terminated_ignores_bracket_inside_quotes() {
+        assert!(!array_terminated("[\"foo]bar\","));
+        assert!(array_terminated("[\"foo]bar\"]"));
+        assert!(array_terminated("[\"a\", \"b\"]"));
+        assert!(!array_terminated("[\"a\","));
+    }
+
+    #[test]
+    fn test_parse_repo_config_keeps_entries_after_bracket_in_value() {
+        // A path entry containing ']' must not prematurely end the array.
+        let content = "copy_files = [\n  \"weird]name\",\n  \".env\",\n]\n";
+        let config = parse_repo_config(Path::new("config.toml"), content).unwrap();
+        assert_eq!(
+            config.copy_files,
+            vec!["weird]name".to_string(), ".env".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_escape_toml_string_round_trips_control_chars() {
+        for value in [
+            "plain",
+            "with\nnewline",
+            "tab\tand\rcr",
+            "quote\" and \\ backslash",
+            "bracket]inside",
+        ] {
+            let escaped = format!("\"{}\"", escape_toml_string(value));
+            let decoded = extract_quoted_strings(&escaped);
+            assert_eq!(
+                decoded,
+                vec![value.to_string()],
+                "round-trip failed for {value:?}"
+            );
+        }
     }
 }
