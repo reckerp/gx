@@ -8,6 +8,7 @@ repository = "https://github.com/reckerp/gx"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
+clap_complete = "4.5"
 miette = { version = "7.1", features = ["fancy"] }
 thiserror = "2.0.17"
 git2 = "0.20.3"
