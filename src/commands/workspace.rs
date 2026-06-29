@@ -2,7 +2,7 @@ use crate::git::{self, GitError, worktree::Worktree};
 use crate::repo_setup::ScriptRun;
 use crate::ui;
 use crate::ui::workspace_picker::WorkspaceAction;
-use crate::{config, repo_setup};
+use crate::{config, repo_config, repo_setup};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::{Diagnostic, Result};
 use std::collections::HashSet;
@@ -115,7 +115,9 @@ pub fn run_new(
         None => (name, branch),
     };
 
-    let path = create_workspace(&name, base, branch, no_setup)?;
+    // `run_hooks` is the seam for section 4's `--no-hooks` flag. Until that
+    // flag is wired in args.rs, hooks always run on create.
+    let path = create_workspace(&name, base, branch, no_setup, true)?;
     print_go_path(&path);
     Ok(())
 }
@@ -131,7 +133,7 @@ pub fn ensure_workspace_for_branch(branch: &str) -> Result<PathBuf> {
     {
         return Ok(existing.path.clone());
     }
-    create_workspace(branch, None, None, false)
+    create_workspace(branch, None, None, false, true)
 }
 
 /// Create a workspace and return its canonical path, with no stdout side
@@ -141,6 +143,7 @@ fn create_workspace(
     base: Option<String>,
     branch: Option<String>,
     no_setup: bool,
+    run_hooks: bool,
 ) -> Result<PathBuf> {
     validate_name(name)?;
 
@@ -155,6 +158,21 @@ fn create_workspace(
 
     let cfg = config::load()?;
     let main_root = main_worktree_root(&worktrees)?;
+
+    // Resolve the full workspace policy: built-in defaults < global config <
+    // personal profile < shared .gx/workspace.toml < local override. CLI flags
+    // (e.g. a future `--no-hooks`) are applied on top by the caller / via the
+    // `run_hooks` gate below.
+    let personal = repo_setup::profile_for_repo(&main_root)?;
+    let (shared, local) = repo_config::load_repo_layers(&main_root)?;
+    let policy = repo_config::resolve(
+        &cfg,
+        &personal,
+        shared.as_ref(),
+        local.as_ref(),
+        &main_root,
+    );
+
     let path = workspace_path(
         &main_root,
         home_dir().as_deref(),
@@ -207,6 +225,19 @@ fn create_workspace(
         (true, base)
     };
 
+    // Pre-create hooks run before the worktree is added so a failed check
+    // (e.g. `test -f package.json`) aborts creation and leaves nothing behind.
+    // The workspace does not exist yet, so they run from the main worktree.
+    if run_hooks && !policy.pre_create_hooks.is_empty() {
+        let vars = repo_config::HookVars {
+            workspace: dir_name.clone(),
+            workspace_path: path.clone(),
+            main_root: main_root.clone(),
+            branch: branch_name.clone(),
+        };
+        repo_config::run_hooks(&policy.pre_create_hooks, &vars, &main_root, true)?;
+    }
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(WorkspaceError::CreateDirFailed)?;
     }
@@ -249,12 +280,92 @@ fn create_workspace(
     eprintln!("  {}", path.display());
 
     if !no_setup {
-        let report =
-            repo_setup::run_setup_pipeline(&main_root, &path, &cfg.workspace.copy_files, true)?;
-        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
+        // Use the resolved policy's copy_files so repo-shared/local copy files
+        // take effect alongside the global and personal sets. The pipeline also
+        // runs the personal profile's setup_script (unchanged).
+        let report = repo_setup::run_setup_pipeline(&main_root, &path, &policy.copy_files, true)?;
+        print_setup_report(&report, "  ", &policy.copy_files);
+
+        // The repo-config setup_script (from .gx) is resolved against main_root
+        // and runs with post-create semantics: a failure warns but keeps the
+        // workspace. The personal profile's script (run above) is left
+        // untouched. Avoid running the same script twice when both sources
+        // happen to point at the same file.
+        if let Some(repo_script) = repo_config_setup_script(&policy, &personal) {
+            run_repo_config_setup_script(&repo_script, &path, &main_root);
+        }
+    }
+
+    // Post-create hooks run after creation and setup, from inside the new
+    // workspace. A failure only warns and keeps the workspace.
+    if run_hooks && !policy.post_create_hooks.is_empty() {
+        let vars = repo_config::HookVars {
+            workspace: dir_name.clone(),
+            workspace_path: path.clone(),
+            main_root: main_root.clone(),
+            branch: branch_name.clone(),
+        };
+        repo_config::run_hooks(&policy.post_create_hooks, &vars, &path, false)?;
     }
 
     Ok(path)
+}
+
+/// The repo-config (`.gx`) setup script to run, if any, distinct from the
+/// personal profile's script (which `run_setup_pipeline` already runs). Returns
+/// `None` when the policy's script came from the personal profile or when the
+/// resolved path does not exist.
+fn repo_config_setup_script(
+    policy: &repo_config::WorkspacePolicy,
+    personal: &repo_setup::RepoSetupProfile,
+) -> Option<PathBuf> {
+    let resolved = policy.resolved_setup_script()?;
+
+    // If the resolved script lives under the personal profile dir, it was
+    // already run by run_setup_pipeline; don't run it again.
+    if resolved.starts_with(&personal.dir) {
+        return None;
+    }
+
+    if resolved.exists() { Some(resolved) } else { None }
+}
+
+/// Run a repo-config setup script with post-create semantics (warn on failure,
+/// keep workspace). Mirrors the env/stdio convention of the personal profile's
+/// script runner so stdout stays clean for the cd target.
+fn run_repo_config_setup_script(script: &Path, workspace_root: &Path, main_root: &Path) {
+    let stdout = match repo_setup::stderr_stdio() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("  warning: could not run setup script {}: {}", script.display(), e);
+            return;
+        }
+    };
+
+    eprintln!("  running setup script {}", script.display());
+    let status = std::process::Command::new("sh")
+        .arg(script)
+        .current_dir(workspace_root)
+        .env("GX_WORKSPACE_ROOT", workspace_root)
+        .env("GX_MAIN_ROOT", main_root)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(stdout)
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "  warning: setup script {} failed with status {}; continuing",
+            script.display(),
+            display_exit_status(&status)
+        ),
+        Err(e) => eprintln!(
+            "  warning: could not run setup script {}: {}",
+            script.display(),
+            e
+        ),
+    }
 }
 
 /// Resolve a workspace by query (or interactively) and print its path to
@@ -666,7 +777,9 @@ fn setup_worktrees(worktrees_to_setup: &[Worktree], all_worktrees: &[Worktree]) 
     }
 
     let main_root = main_worktree_root(all_worktrees)?;
-    let cfg = config::load()?;
+    // `gx workspace setup` applies the configured policy, so it honors the
+    // shared repo config too. Hooks are only run on create, not setup.
+    let policy = repo_config::resolve_for_repo(&main_root)?;
 
     for target in &targets {
         if paths_equal(&main_root, &target.path) {
@@ -677,15 +790,11 @@ fn setup_worktrees(worktrees_to_setup: &[Worktree], all_worktrees: &[Worktree]) 
             continue;
         }
 
-        let report = repo_setup::run_setup_pipeline(
-            &main_root,
-            &target.path,
-            &cfg.workspace.copy_files,
-            true,
-        )?;
+        let report =
+            repo_setup::run_setup_pipeline(&main_root, &target.path, &policy.copy_files, true)?;
 
         eprintln!("Setup for '{}':", target.name);
-        print_setup_report(&report, "  ", &cfg.workspace.copy_files);
+        print_setup_report(&report, "  ", &policy.copy_files);
     }
 
     Ok(())
