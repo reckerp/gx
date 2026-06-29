@@ -1,4 +1,6 @@
-use crate::commands::workspace::{delete_local_branch, main_worktree_root};
+use crate::commands::workspace::{
+    RemoveOutcome, delete_local_branch, main_worktree_root, remove_one_worktree,
+};
 use crate::output;
 use crate::config::{self, Config};
 use crate::git::time::now_secs;
@@ -333,23 +335,14 @@ fn apply_clean_action(action: &CleanAction, main_root: &Path) -> Result<()> {
 
     for worktree in &targets {
         eprintln!("Removing workspace '{}'...", worktree.name);
-        match git::worktree::remove(main_root, &worktree.path, false) {
-            Ok(()) => {}
-            Err(GitError::CommandFailed { stderr: msg, .. })
-                if msg.contains("contains modified or untracked files") =>
-            {
-                let confirmed = ui::confirm::run_on_stderr(&format!(
-                    "Workspace '{}' has modified or untracked files. Remove anyway?",
-                    worktree.name
-                ))?;
-                if !confirmed {
-                    eprintln!("Skipped '{}'", worktree.name);
-                    continue;
-                }
-                git::worktree::remove(main_root, &worktree.path, true)
-                    .map_err(WorkspaceCleanError::GitError)?;
+        // `gx workspace clean` skips a dirty workspace the user won't force and
+        // moves on, rather than aborting the whole sweep.
+        match remove_one_worktree(main_root, worktree, false)? {
+            RemoveOutcome::Removed => {}
+            RemoveOutcome::SkippedDirty => {
+                eprintln!("Skipped '{}'", worktree.name);
+                continue;
             }
-            Err(e) => return Err(WorkspaceCleanError::GitError(e).into()),
         }
 
         match &worktree.branch {

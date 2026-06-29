@@ -1376,10 +1376,13 @@ fn remove_worktrees(
     for worktree in &targets {
         eprintln!("Removing workspace '{}'...", worktree.name);
 
+        // Known-dirty (from the picker's summary) and unlocked: confirm the
+        // force up front to skip a guaranteed-failing plain removal.
         let use_force = if force {
             true
         } else if known_dirty_paths.contains(&worktree.path) && !worktree.is_locked {
             if !confirm_force_remove(worktree)? {
+                output::cancelled();
                 return Ok(());
             }
             true
@@ -1387,20 +1390,14 @@ fn remove_worktrees(
             false
         };
 
-        match git::worktree::remove(&main_root, &worktree.path, use_force) {
-            Ok(()) => {}
-            // copied setup files (e.g. .env) are untracked, so offer a force
-            // removal instead of failing outright
-            Err(GitError::CommandFailed { stderr: msg, .. })
-                if !use_force && msg.contains("contains modified or untracked files") =>
-            {
-                if !confirm_force_remove(worktree)? {
-                    return Ok(());
-                }
-                git::worktree::remove(&main_root, &worktree.path, true)
-                    .map_err(WorkspaceError::GitError)?;
+        match remove_one_worktree(&main_root, worktree, use_force)? {
+            RemoveOutcome::Removed => {}
+            // `gx workspace remove` aborts the whole operation if the user
+            // declines to force-remove a dirty workspace.
+            RemoveOutcome::SkippedDirty => {
+                output::cancelled();
+                return Ok(());
             }
-            Err(e) => return Err(WorkspaceError::GitError(e).into()),
         }
 
         match &worktree.branch {
@@ -1428,15 +1425,49 @@ fn remove_worktrees(
     Ok(())
 }
 
+/// Outcome of [`remove_one_worktree`].
+pub(crate) enum RemoveOutcome {
+    Removed,
+    /// The worktree had modified/untracked files and the user declined the
+    /// force-removal prompt. The caller decides whether to abort or skip it.
+    SkippedDirty,
+}
+
+/// Remove a single worktree, recovering from git's "contains modified or
+/// untracked files" refusal by prompting for a force removal. `force` skips the
+/// dirty check (the caller already decided to force). Other git errors
+/// propagate. Shared by `gx workspace remove` and `gx workspace clean` so the
+/// dirty-recovery path lives in exactly one place.
+pub(crate) fn remove_one_worktree(
+    main_root: &Path,
+    worktree: &Worktree,
+    force: bool,
+) -> Result<RemoveOutcome> {
+    match git::worktree::remove(main_root, &worktree.path, force) {
+        Ok(()) => Ok(RemoveOutcome::Removed),
+        // copied setup files (e.g. .env) are untracked, so offer a force
+        // removal instead of failing outright.
+        Err(GitError::CommandFailed { stderr: msg, .. })
+            if !force && msg.contains("contains modified or untracked files") =>
+        {
+            if !confirm_force_remove(worktree)? {
+                return Ok(RemoveOutcome::SkippedDirty);
+            }
+            git::worktree::remove(main_root, &worktree.path, true)
+                .map_err(WorkspaceError::GitError)?;
+            Ok(RemoveOutcome::Removed)
+        }
+        Err(e) => Err(WorkspaceError::GitError(e).into()),
+    }
+}
+
+/// Prompt (on stderr) to force-remove a worktree with modified/untracked files.
+/// The caller reports the decline (abort vs skip), so this only asks.
 fn confirm_force_remove(worktree: &Worktree) -> Result<bool> {
-    let confirmed = ui::confirm::run_on_stderr(&format!(
+    ui::confirm::run_on_stderr(&format!(
         "Workspace '{}' has modified or untracked files. Remove anyway?",
         worktree.name
-    ))?;
-    if !confirmed {
-        output::cancelled();
-    }
-    Ok(confirmed)
+    ))
 }
 
 pub(crate) fn delete_local_branch(main_root: &Path, branch: &str) -> Result<()> {
