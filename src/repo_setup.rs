@@ -625,7 +625,7 @@ fn run_setup_script(
 /// stdout clean (it carries the cd target path the shell wrapper consumes).
 /// Prefers `/dev/stderr`, but falls back to a duplicate of the real stderr fd so
 /// a missing/unwritable `/dev/stderr` doesn't abort an otherwise-runnable script.
-fn stderr_stdio() -> Result<Stdio> {
+pub(crate) fn stderr_stdio() -> Result<Stdio> {
     if let Ok(file) = OpenOptions::new().write(true).open("/dev/stderr") {
         return Ok(Stdio::from(file));
     }
