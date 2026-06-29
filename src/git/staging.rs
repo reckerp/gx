@@ -86,15 +86,31 @@ pub fn stage_all() -> Result<Vec<String>, GitError> {
 
 pub fn get_staged_diff() -> Result<String, GitError> {
     let repo = get_repo()?;
-    let mut diff_options = git2::DiffOptions::new();
-
     let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+    diff_index_against(&repo, head_tree.as_ref())
+}
 
-    let diff = repo.diff_tree_to_index(
-        head_tree.as_ref(),
-        Some(&repo.index()?),
-        Some(&mut diff_options),
-    )?;
+/// Diff for the commit produced by `--amend`: the index against HEAD's *parent*,
+/// so it reflects the full content of the amended commit (the original change
+/// plus anything newly staged). `get_staged_diff` would compare against HEAD and
+/// therefore be empty on a plain reword, which is why amend needs its own diff.
+pub fn get_amend_diff() -> Result<String, GitError> {
+    let repo = get_repo()?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let parent_tree = match head_commit.parent(0) {
+        Ok(parent) => Some(parent.tree()?),
+        // Amending the root commit: diff against the empty tree.
+        Err(_) => None,
+    };
+    diff_index_against(&repo, parent_tree.as_ref())
+}
+
+fn diff_index_against(
+    repo: &git2::Repository,
+    old_tree: Option<&git2::Tree>,
+) -> Result<String, GitError> {
+    let mut diff_options = git2::DiffOptions::new();
+    let diff = repo.diff_tree_to_index(old_tree, Some(&repo.index()?), Some(&mut diff_options))?;
 
     let mut diff_text = String::new();
     diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {

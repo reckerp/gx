@@ -55,3 +55,40 @@ pub fn status_char(status: crate::git::status::FileStatus) -> char {
         crate::git::status::FileStatus::Typechange => 'T',
     }
 }
+
+/// Keep the selected row inside the visible window, returning the adjusted
+/// scroll offset. The `visible_height == 0` guard matters: a viewport too short
+/// to show any rows would otherwise underflow `visible_height - 1` (a debug-build
+/// panic, a wrap in release). Shared by every scrolling picker.
+pub(crate) fn adjust_scroll(selected: usize, scroll_offset: usize, visible_height: usize) -> usize {
+    if visible_height == 0 {
+        return scroll_offset;
+    }
+
+    if selected >= scroll_offset + visible_height {
+        selected.saturating_sub(visible_height - 1)
+    } else if selected < scroll_offset {
+        selected
+    } else {
+        scroll_offset
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adjust_scroll_keeps_selection_visible() {
+        assert_eq!(adjust_scroll(0, 0, 5), 0);
+        assert_eq!(adjust_scroll(5, 0, 5), 1);
+        assert_eq!(adjust_scroll(2, 5, 5), 2);
+    }
+
+    #[test]
+    fn test_adjust_scroll_zero_height_is_noop() {
+        // A zero-height viewport must not underflow; it just keeps the offset.
+        assert_eq!(adjust_scroll(7, 3, 0), 3);
+        assert_eq!(adjust_scroll(0, 0, 0), 0);
+    }
+}

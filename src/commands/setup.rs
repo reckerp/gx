@@ -34,7 +34,11 @@ pub fn run() -> Result<()> {
     output.push_str(&format!("# Config file: {}\n", config_path.display()));
     output.push_str("# Run: eval \"$(gx setup)\"\n\n");
 
-    for (alias, command) in &config.aliases {
+    // Sort by alias name so `gx setup` emits a stable order (config.aliases is a
+    // HashMap, whose iteration order varies run to run).
+    let mut aliases: Vec<(&String, &String)> = config.aliases.iter().collect();
+    aliases.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (alias, command) in aliases {
         output.push_str(&format!("alias {}='gx {}'\n", alias, command));
     }
 

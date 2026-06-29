@@ -171,8 +171,17 @@ will be treated as untrusted input.",
     let prompt = build_investigate_prompt(pr);
 
     eprintln!("Launching {agent} in {}…", path.display());
-    ai::launch_interactive(&agent, &cfg.ai.model, &prompt, &path)
+    let status = ai::launch_interactive(&agent, &cfg.ai.model, &prompt, &path)
         .map_err(|e| PrCommandError::Ai(e.to_string()))?;
+    // A non-zero exit (crash, auth failure) is a real signal; surface it instead
+    // of reporting silent success. It isn't fatal to gx — the workspace is already
+    // prepared — so warn rather than return an error.
+    if !status.success() {
+        match status.code() {
+            Some(code) => eprintln!("Warning: {agent} exited with status {code}"),
+            None => eprintln!("Warning: {agent} was terminated by a signal"),
+        }
+    }
     Ok(())
 }
 

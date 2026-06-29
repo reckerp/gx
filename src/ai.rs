@@ -86,20 +86,36 @@ pub fn run_capturing(
         .spawn()
         .map_err(|e| AiError::Spawn(format!("Failed to spawn {command}: {e}")))?;
 
-    if let Some(input) = stdin {
-        // Take the handle and drop it after writing so the agent sees EOF.
-        let mut handle = child
-            .stdin
-            .take()
-            .ok_or_else(|| AiError::Failed(format!("{command}: failed to open stdin")))?;
-        handle
-            .write_all(input.as_bytes())
-            .map_err(|e| AiError::Io(format!("I/O error talking to {command}: {e}")))?;
-    }
+    // Feed stdin from a separate thread so a large prompt can't deadlock: the
+    // agent may emit stdout/stderr while we're still writing, and once those
+    // ~64KB pipe buffers fill it blocks on write. `wait_with_output` below drains
+    // both output pipes concurrently, so writing stdin off-thread keeps both
+    // sides flowing. The handle drops when the thread ends, closing stdin so the
+    // agent sees EOF.
+    let writer = match stdin {
+        Some(input) => {
+            let mut handle = child
+                .stdin
+                .take()
+                .ok_or_else(|| AiError::Failed(format!("{command}: failed to open stdin")))?;
+            let data = input.as_bytes().to_vec();
+            // Write errors (e.g. the agent closed stdin early) are intentionally
+            // ignored here; the exit status and captured stderr below reflect the
+            // real outcome.
+            Some(std::thread::spawn(move || {
+                let _ = handle.write_all(&data);
+            }))
+        }
+        None => None,
+    };
 
     let output = child
         .wait_with_output()
         .map_err(|e| AiError::Io(format!("I/O error talking to {command}: {e}")))?;
+
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

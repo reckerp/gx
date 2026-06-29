@@ -1,4 +1,4 @@
-use super::{Term, render_help_bar};
+use super::{Term, adjust_scroll, render_help_bar};
 use crate::repo_setup::CopyCandidate;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use miette::IntoDiagnostic;
@@ -17,6 +17,7 @@ pub fn run(
 
     let initial: HashSet<&str> = initial_selection.iter().map(String::as_str).collect();
     let mut selected_index = 0;
+    let mut scroll_offset = 0;
     let mut selected_paths: HashSet<String> = candidates
         .iter()
         .filter(|candidate| initial.contains(candidate.path.as_str()))
@@ -32,9 +33,14 @@ pub fn run(
                     .constraints([Constraint::Min(0), Constraint::Length(3)])
                     .split(area);
 
+                let visible_height = chunks[0].height.saturating_sub(2) as usize;
+                scroll_offset = adjust_scroll(selected_index, scroll_offset, visible_height);
+
                 let items: Vec<ListItem> = candidates
                     .iter()
                     .enumerate()
+                    .skip(scroll_offset)
+                    .take(visible_height)
                     .map(|(i, candidate)| {
                         let is_selected = selected_paths.contains(&candidate.path);
                         let is_current = i == selected_index;

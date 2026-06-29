@@ -1,10 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_secs() -> i64 {
+    // A clock set before 1970 would make `duration_since` error; fall back to the
+    // epoch rather than panicking (relative times just read as very old).
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub fn format_relative(diff_secs: i64) -> String {

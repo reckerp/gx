@@ -172,6 +172,9 @@ pub fn get_recent_commits(branch_name: &str, limit: usize) -> Result<Vec<String>
     let commit = resolve_branch_commit(&repo, branch_name)?;
 
     let mut revwalk = repo.revwalk()?;
+    // Without an explicit sort the walk order is unspecified, so `take(limit)`
+    // could miss the actual most-recent commits; TIME order yields newest first.
+    revwalk.set_sorting(git2::Sort::TIME)?;
     revwalk.push(commit.id())?;
 
     let messages: Vec<String> = revwalk

@@ -98,7 +98,15 @@ pub fn run(message: Option<String>, amend: bool, no_edit: bool, ai: bool) -> Res
 }
 
 fn run_ai_commit(amend: bool) -> Result<()> {
-    let diff = git::staging::get_staged_diff().map_err(CommitError::GitError)?;
+    // On --amend the staging step is skipped, so the index matches HEAD and the
+    // staged diff would be empty; diff against HEAD's parent instead so the AI
+    // sees the content of the commit being amended.
+    let diff = if amend {
+        git::staging::get_amend_diff()
+    } else {
+        git::staging::get_staged_diff()
+    }
+    .map_err(CommitError::GitError)?;
 
     if diff.is_empty() {
         return Err(CommitError::NothingToCommit.into());

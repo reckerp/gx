@@ -1,4 +1,4 @@
-use super::{Term, render_help_bar};
+use super::{Term, adjust_scroll, render_help_bar};
 use crate::git::log::{CommitDetails, LogGraph};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use miette::IntoDiagnostic;
@@ -56,13 +56,7 @@ pub fn run(terminal: &mut Term, log: &LogGraph) -> miette::Result<LogAction> {
                     .split(chunks[0]);
 
                 let visible_height = main_chunks[0].height.saturating_sub(2) as usize;
-
-                if selected_index >= scroll_offset + visible_height {
-                    scroll_offset = selected_index.saturating_sub(visible_height - 1);
-                }
-                if selected_index < scroll_offset {
-                    scroll_offset = selected_index;
-                }
+                scroll_offset = adjust_scroll(selected_index, scroll_offset, visible_height);
 
                 render_log_list(f, main_chunks[0], log, selected_index, scroll_offset);
                 render_details_pane(f, main_chunks[1], details.as_ref());

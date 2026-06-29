@@ -163,9 +163,19 @@ pub fn branch(name: &str, index: usize) -> Result<(), GitError> {
 }
 
 fn extract_branch_from_message(message: &str) -> String {
-    let lower = message.to_lowercase();
-    if let Some(start) = lower.find("on ") {
-        let rest = &message[start + 3..];
+    // Stash messages look like "WIP on <branch>: ..." or "On <branch>: ...".
+    // Locate "on " case-insensitively via byte windows on the ORIGINAL string:
+    // lowercasing first can change byte lengths for non-ASCII text, so an index
+    // from the lowercased string can land mid-char and either return the wrong
+    // slice or panic. The needle is ASCII, so the matched offset is a valid
+    // char boundary in the original.
+    let needle = b"on ";
+    if let Some(start) = message
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+    {
+        let rest = &message[start + needle.len()..];
         if let Some(end) = rest.find(':') {
             return rest[..end].to_string();
         }
@@ -181,4 +191,40 @@ fn extract_stash_description(message: &str) -> String {
         }
     }
     message.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_branch_from_message_standard_formats() {
+        assert_eq!(
+            extract_branch_from_message("WIP on main: 1a2b3c msg"),
+            "main"
+        );
+        assert_eq!(
+            extract_branch_from_message("On feature/x: 1a2b3c msg"),
+            "feature/x"
+        );
+    }
+
+    #[test]
+    fn test_extract_branch_from_message_non_ascii_does_not_panic() {
+        // A multibyte char before "on " used to shift the lowercased byte index
+        // and could slice mid-char (panic) or return a wrong substring.
+        let msg = "WIP on naïve-café: 1a2b3c work";
+        assert_eq!(extract_branch_from_message(msg), "naïve-café");
+
+        let msg = "On 日本語-branch: deadbee did things";
+        assert_eq!(extract_branch_from_message(msg), "日本語-branch");
+    }
+
+    #[test]
+    fn test_extract_branch_from_message_unknown_when_no_match() {
+        assert_eq!(
+            extract_branch_from_message("garbage without marker"),
+            "unknown"
+        );
+    }
 }

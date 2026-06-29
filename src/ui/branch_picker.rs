@@ -1,4 +1,4 @@
-use super::{Term, render_help_bar};
+use super::{Term, adjust_scroll, render_help_bar};
 use crate::git::branch::BranchInfo;
 use crate::git::time;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -7,6 +7,8 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::IntoDiagnostic;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const DEBOUNCE_MS: u64 = 150;
@@ -65,20 +67,6 @@ fn render_branch_list(
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(">> ")
-}
-
-fn adjust_scroll(selected: usize, scroll_offset: usize, visible_height: usize) -> usize {
-    if visible_height == 0 {
-        return scroll_offset;
-    }
-
-    if selected >= scroll_offset + visible_height {
-        selected.saturating_sub(visible_height - 1)
-    } else if selected < scroll_offset {
-        selected
-    } else {
-        scroll_offset
-    }
 }
 
 fn visible_range(total: usize, scroll_offset: usize, visible_height: usize) -> String {
@@ -160,6 +148,10 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
     let mut info_loading = false;
     let mut last_selection_change = Instant::now();
     let mut pending_info_fetch = false;
+    // In-flight background fetch. Fetching branch info shells out to git and can
+    // be slow on large repos, so it runs off-thread and its result is delivered
+    // here; doing it inline froze the picker on every selection change.
+    let mut info_rx: Option<Receiver<(String, Option<BranchInfo>)>> = None;
 
     loop {
         let filtered = filter_branches(all_branches, &query);
@@ -177,24 +169,49 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
             last_selection_change = Instant::now();
             info_loading = true;
             branch_info = None;
+            // Abandon any in-flight fetch for the previous selection; a late
+            // result is discarded by the name check below.
+            info_rx = None;
         }
 
-        // check should fetch info (debounce expired)
+        // Spawn the fetch once the debounce expires, so rapid navigation doesn't
+        // launch a fetch per keystroke.
         if pending_info_fetch
             && last_selection_change.elapsed() >= Duration::from_millis(DEBOUNCE_MS)
         {
             pending_info_fetch = false;
-            if let Some(ref branch_name) = last_selected {
-                match BranchInfo::fetch(branch_name) {
-                    Ok(info) => {
-                        branch_info = Some(info);
+            if let Some(branch_name) = last_selected.clone() {
+                let (tx, rx) = mpsc::channel();
+                thread::spawn(move || {
+                    let info = BranchInfo::fetch(&branch_name).ok();
+                    let _ = tx.send((branch_name, info));
+                });
+                info_rx = Some(rx);
+            } else {
+                info_loading = false;
+            }
+        }
+
+        // Drain a completed fetch without blocking; ignore stale results whose
+        // branch no longer matches the current selection.
+        if let Some(rx) = info_rx.take() {
+            match rx.try_recv() {
+                Ok((branch_name, info)) => {
+                    if Some(&branch_name) == last_selected.as_ref() {
+                        branch_info = info;
+                        info_loading = false;
                     }
-                    Err(_) => {
-                        // keep branch_info as None on error
-                    }
+                    // Fetch consumed; leave info_rx cleared.
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still in flight: keep the receiver for the next iteration.
+                    info_rx = Some(rx);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Worker ended without a result; stop showing the spinner.
+                    info_loading = false;
                 }
             }
-            info_loading = false;
         }
 
         terminal
@@ -270,7 +287,7 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
                     selected_index = 0;
                     scroll_offset = 0;
                 }
-                (KeyCode::Char(c), _) => {
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                     query.push(c);
                     selected_index = 0;
                     scroll_offset = 0;
