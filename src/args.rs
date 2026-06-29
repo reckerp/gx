@@ -188,6 +188,31 @@ pub enum WorkspaceCommands {
         /// Skip copying setup files (e.g. .env) into the new workspace
         #[arg(long)]
         no_setup: bool,
+
+        /// Create the workspace but do not request shell navigation
+        #[arg(long)]
+        no_cd: bool,
+
+        /// Skip fetching origin; resolve the base from local refs only
+        #[arg(long)]
+        no_fetch: bool,
+
+        /// Copy staged file contents from the current workspace into the new
+        /// one (optionally limited to PATHS)
+        #[arg(long, num_args = 0.., value_name = "PATH")]
+        from_staged: Option<Vec<String>>,
+
+        /// Skip workspace creation hooks
+        #[arg(long)]
+        no_hooks: bool,
+
+        /// Create the workspace with a detached HEAD instead of a new branch
+        #[arg(long, conflicts_with_all = ["branch", "track"])]
+        detach: bool,
+
+        /// Set the base's remote branch as the new branch's upstream
+        #[arg(long)]
+        track: bool,
     },
 
     /// Switch to a workspace (prints its path; cd handled by 'gx setup' shell wrapper)
@@ -275,7 +300,26 @@ impl Commands {
                     base,
                     branch,
                     no_setup,
-                }) => commands::workspace::run_new(name, base, branch, no_setup),
+                    no_cd,
+                    no_fetch,
+                    from_staged,
+                    no_hooks,
+                    detach,
+                    track,
+                }) => commands::workspace::run_new(
+                    name,
+                    commands::workspace::NewWorkspaceOptions {
+                        base,
+                        branch,
+                        no_setup,
+                        no_cd,
+                        no_fetch,
+                        from_staged,
+                        no_hooks,
+                        detach,
+                        track,
+                    },
+                ),
                 Some(WorkspaceCommands::Go { query }) => commands::workspace::run_go(query),
                 Some(WorkspaceCommands::List) => commands::workspace::run_list(),
                 Some(WorkspaceCommands::Update { query, base }) => {
