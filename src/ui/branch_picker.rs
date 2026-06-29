@@ -1,9 +1,8 @@
-use super::{Term, adjust_scroll, render_help_bar};
+use super::{Term, adjust_scroll, fuzzy_filter, render_help_bar, render_search_bar, visible_range};
 use crate::git::branch::BranchInfo;
 use crate::git::time;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::IntoDiagnostic;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -12,29 +11,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEBOUNCE_MS: u64 = 150;
-
-fn filter_branches(branches: &[String], query: &str) -> Vec<String> {
-    if query.is_empty() {
-        return branches.to_vec();
-    }
-
-    let matcher = SkimMatcherV2::default();
-    let mut matches: Vec<_> = branches
-        .iter()
-        .filter_map(|b| matcher.fuzzy_match(b, query).map(|score| (score, b)))
-        .collect();
-
-    matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-    matches.into_iter().map(|(_, b)| b.clone()).collect()
-}
-
-fn render_search_bar(query: &str) -> Paragraph<'_> {
-    Paragraph::new(query).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Fuzzy Search "),
-    )
-}
 
 fn render_branch_list(
     branches: &[String],
@@ -67,16 +43,6 @@ fn render_branch_list(
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol(">> ")
-}
-
-fn visible_range(total: usize, scroll_offset: usize, visible_height: usize) -> String {
-    if total == 0 || visible_height == 0 {
-        return "0 shown".to_string();
-    }
-
-    let start = scroll_offset.min(total - 1) + 1;
-    let end = (scroll_offset + visible_height).min(total);
-    format!("{}-{} of {}", start, end, total)
 }
 
 fn render_info_pane<'a>(info: Option<&BranchInfo>, loading: bool) -> Paragraph<'a> {
@@ -154,7 +120,7 @@ pub fn run(terminal: &mut Term, all_branches: &[String]) -> miette::Result<Optio
     let mut info_rx: Option<Receiver<(String, Option<BranchInfo>)>> = None;
 
     loop {
-        let filtered = filter_branches(all_branches, &query);
+        let filtered = fuzzy_filter(all_branches, &query, |m, b| m.fuzzy_match(b, &query));
 
         if selected_index >= filtered.len() && !filtered.is_empty() {
             selected_index = filtered.len() - 1;

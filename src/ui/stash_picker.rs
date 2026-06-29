@@ -1,4 +1,4 @@
-use super::{Term, render_help_bar};
+use super::{Term, render_help_bar, truncate};
 use crate::git::stash::StashEntry;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use miette::IntoDiagnostic;
@@ -223,7 +223,7 @@ fn render_list(f: &mut ratatui::Frame, area: Rect, stashes: &[StashEntry], selec
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    truncate_message(&stash.message, 50),
+                    truncate(stash.message.lines().next().unwrap_or(&stash.message), 50),
                     if is_current {
                         Style::default().fg(Color::White).bold()
                     } else {
@@ -284,14 +284,4 @@ fn render_action_menu(
     );
 
     f.render_widget(list, chunks[1]);
-}
-
-fn truncate_message(msg: &str, max_len: usize) -> String {
-    let first_line = msg.lines().next().unwrap_or(msg);
-    if first_line.chars().count() > max_len {
-        let truncated: String = first_line.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", truncated)
-    } else {
-        first_line.to_string()
-    }
 }

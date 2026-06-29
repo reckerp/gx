@@ -1,4 +1,4 @@
-use super::{Term, adjust_scroll, render_help_bar};
+use super::{Term, adjust_scroll, render_help_bar, truncate};
 use crate::git::log::{CommitDetails, LogGraph};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use miette::IntoDiagnostic;
@@ -303,13 +303,4 @@ fn render_details_pane(f: &mut ratatui::Frame, area: Rect, details: Option<&Comm
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() > max_len {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
-    }
 }

@@ -3,7 +3,7 @@
 //! `workspace_picker`) so open-in-workspace / troubleshoot can print a cd-path
 //! to stdout for the `gx setup` shell wrapper.
 
-use super::{TermStderr, render_help_bar};
+use super::{TermStderr, adjust_scroll, render_help_bar, truncate};
 use crate::ai;
 use crate::browser;
 use crate::clipboard;
@@ -95,16 +95,6 @@ fn cross_repo_msg(launch_repo: &Option<(String, String)>) -> String {
             format!("Workspace actions are only available in the launch repo ({owner}/{repo})")
         }
         None => "Workspace actions need a current repo".to_string(),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
     }
 }
 
@@ -220,19 +210,6 @@ fn pr_row_spans(pr: &DashboardPr, is_selected: bool, launch_repo: &Option<(Strin
     }
 
     Line::from(spans)
-}
-
-fn adjust_scroll(selected_row: usize, scroll: usize, height: usize) -> usize {
-    if height == 0 {
-        return scroll;
-    }
-    if selected_row >= scroll + height {
-        selected_row.saturating_sub(height - 1)
-    } else if selected_row < scroll {
-        selected_row
-    } else {
-        scroll
-    }
 }
 
 fn selected_row_index(display: &Display, selected: usize) -> usize {
@@ -1017,11 +994,5 @@ mod tests {
         assert!(is_local(&p, &Some(("dash0hq".to_string(), "dash0".to_string()))));
         assert!(!is_local(&p, &Some(("dash0hq".to_string(), "other".to_string()))));
         assert!(!is_local(&p, &None));
-    }
-
-    #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("abcdefghij", 5), "abcd…");
     }
 }

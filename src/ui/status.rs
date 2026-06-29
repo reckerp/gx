@@ -1,4 +1,4 @@
-use super::{status_char, status_color};
+use super::{status_char, status_color, truncate};
 use crate::git::status::{FileStatus, RepoStatus};
 use ratatui::prelude::*;
 
@@ -196,15 +196,6 @@ fn render_hints(status: &RepoStatus) -> Line<'static> {
     }
 
     Line::from(hints)
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    }
 }
 
 fn print_line(line: &Line) {
