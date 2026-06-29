@@ -202,6 +202,13 @@ gx workspace remove [query] # Remove a workspace (asks for confirmation).
 gx workspace remove <name> --force # Remove even with uncommitted changes
 gx workspace remove <name> --delete-branch # Also delete the local branch
 gx workspace setup         # Re-run setup: copy files, then run setup script
+gx workspace root          # Print the main worktree root, e.g. cd "$(gx workspace root)"
+gx workspace move <query> <new-path> # Move a workspace to a new path (refuses the
+                                     # main worktree and existing destinations)
+gx workspace lock <query> [--reason <reason>]  # Lock a workspace so cleanup and
+                                               # 'git worktree prune' skip it
+gx workspace unlock <query> # Clear a workspace lock
+gx workspace repair [query] # Repair worktree admin files after a move (all if omitted)
 ```
 
 **Interactive TUI** (`gx workspace`): fuzzy search across workspace names and branches, with `enter` to switch and `ctrl+n` to create a workspace named after the current query. The workspace list supports multi-select: `space` toggles a workspace, `ctrl+a` toggles all visible workspaces, and `ctrl+u` clears selections. When GitHub CLI (`gh`) is available, workspace rows show PR badges for open, draft, merged, and closed pull requests. Use `ctrl+d` to remove selected workspaces, or `ctrl+b` to remove them and delete their local branches after an inline confirmation. Bulk actions include `ctrl+r` to update/rebase selected workspaces and `ctrl+t` to re-copy setup files. Press `?` for the full help screen.
