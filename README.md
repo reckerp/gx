@@ -188,6 +188,30 @@ gx workspace new <name> -b <branch> # Check out an existing/specific branch
 gx workspace new <github-url> # Resolve a PR/branch URL (or '#13') to a branch
                               # and create a workspace named after that branch
 gx workspace new <name> --no-setup # Skip copying setup files and setup script
+gx workspace new <name> --no-cd    # Create the workspace but stay put (no shell
+                                   # navigation; stdout stays empty for scripts)
+gx workspace new <name> --no-fetch # Offline: resolve the base from local refs
+                                   # only (skips fetching origin). If the base
+                                   # can't be resolved locally, gx says so and
+                                   # suggests retrying without --no-fetch.
+gx workspace new feat/x --from-staged          # Extract work staged in the
+                                               # current workspace: copy the
+                                               # staged file contents into the
+                                               # new one (the source is left
+                                               # untouched)
+gx workspace new feat/x --from-staged a.rs b.rs # ...limited to specific paths.
+                                               # Staged deletions are skipped
+                                               # (no content to copy).
+gx workspace new <name> --detach   # Detached HEAD instead of a new branch
+                                   # (mirrors 'git worktree add --detach'; pass
+                                   # a <base> to detach at a specific commit)
+gx workspace new <name> --track    # Set the base's remote branch as the new
+                                   # branch's upstream (mirrors git tracking)
+# If a branch name collides with an existing one in git's ref namespace
+# (e.g. 'foo/bar' when branch 'foo' exists), gx explains the conflict instead
+# of letting 'git worktree add' fail cryptically. If the target path is already
+# a worktree on a clean, different branch, gx safely switches it (or navigates
+# to wherever the branch is already checked out).
 
 gx workspace go [query]    # Switch to a workspace (fuzzy match, picker if omitted)
 gx workspace go <github-url>       # Switch to the workspace on a PR/branch's branch
