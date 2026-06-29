@@ -203,7 +203,7 @@ pub enum WorkspaceCommands {
 
     /// Update a workspace: fetch origin and rebase its branch onto
     /// origin's default branch (e.g. origin/main)
-    #[command(alias = "up", alias = "sync")]
+    #[command(alias = "up")]
     Update {
         /// Workspace to update (defaults to the current one)
         query: Option<String>,
@@ -229,6 +229,27 @@ pub enum WorkspaceCommands {
 
     /// Copy setup files (e.g. .env) from the main worktree into this workspace
     Setup,
+
+    /// Copy files/directories between two workspaces (manual copy tool).
+    /// Defaults: target = current workspace, source = main worktree,
+    /// paths = configured setup copy files.
+    Sync {
+        /// Target workspace: workspace name, branch, fuzzy query, or absolute
+        /// path. Defaults to the current workspace.
+        target: Option<String>,
+
+        /// Paths to copy (repo-relative). Defaults to configured copy_files.
+        paths: Vec<String>,
+
+        /// Source workspace (same resolution as target). Defaults to the main
+        /// worktree.
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Print what would be copied without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 impl Commands {
@@ -287,6 +308,12 @@ impl Commands {
                     delete_branch,
                 }) => commands::workspace::run_remove(query, force, delete_branch),
                 Some(WorkspaceCommands::Setup) => commands::workspace::run_setup(),
+                Some(WorkspaceCommands::Sync {
+                    target,
+                    paths,
+                    from,
+                    dry_run,
+                }) => commands::workspace::run_sync(target, from, paths, dry_run),
             },
             Commands::Pr { action } => match action {
                 None => commands::pr::run_interactive(),
