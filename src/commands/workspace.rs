@@ -42,6 +42,29 @@ pub enum WorkspaceError {
     )]
     RemoveMain,
 
+    #[error("Cannot move the main worktree")]
+    #[diagnostic(
+        code(gx::workspace::move_main),
+        help(
+            "The main worktree is the original repository checkout; move it with 'git worktree move' manually if you must"
+        )
+    )]
+    MoveMain,
+
+    #[error("Destination '{0}' already exists")]
+    #[diagnostic(
+        code(gx::workspace::destination_exists),
+        help("Choose a path that does not exist yet")
+    )]
+    DestinationExists(PathBuf),
+
+    #[error("Cannot lock the main worktree")]
+    #[diagnostic(
+        code(gx::workspace::lock_main),
+        help("The main worktree is the original repository checkout and cannot be locked")
+    )]
+    LockMain,
+
     #[error("Invalid workspace name: {0}")]
     #[diagnostic(code(gx::workspace::invalid_name))]
     InvalidName(String),
@@ -721,6 +744,118 @@ pub fn run_setup() -> Result<()> {
     setup_worktrees(&[current], &worktrees)
 }
 
+/// Print the main worktree root to STDOUT, for use in scripts and aliases:
+/// `cd "$(gx workspace root)"`. Unlike the navigation commands this is a plain
+/// value command, so it emits the canonical path on stdout with no stderr hint.
+pub fn run_root() -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let main_root = main_worktree_root(&worktrees)?;
+    let canonical = main_root.canonicalize().unwrap_or(main_root);
+    println!("{}", canonical.display());
+    Ok(())
+}
+
+/// Move a workspace to a new path via `git worktree move`. Refuses the main
+/// worktree and refuses an existing destination. Human-readable output goes to
+/// stderr; nothing is written to stdout unless the CURRENT workspace is moved,
+/// in which case the new path is emitted via [`print_go_path`] so the shell
+/// wrapper follows the user into it (mirroring the current-workspace handling
+/// in [`remove_worktrees`]).
+pub fn run_move(workspace: String, new_path: String) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let target = fuzzy_match_worktree(&workspace, &worktrees)
+        .ok_or_else(|| WorkspaceError::NoMatch(workspace.clone()))?;
+
+    if target.is_main {
+        return Err(WorkspaceError::MoveMain.into());
+    }
+
+    let cwd = std::env::current_dir().map_err(WorkspaceError::CopyFailed)?;
+    let dest = resolve_dest_path(&new_path, home_dir().as_deref(), &cwd);
+
+    if dest.exists() {
+        return Err(WorkspaceError::DestinationExists(dest).into());
+    }
+
+    let main_root = main_worktree_root(&worktrees)?;
+    git::worktree::move_worktree(&main_root, &target.path, &dest)
+        .map_err(WorkspaceError::GitError)?;
+
+    eprintln!("Moved workspace '{}' to {}", target.name, dest.display());
+
+    if target.is_current {
+        eprintln!("Switching to moved workspace");
+        print_go_path(&dest);
+    }
+
+    Ok(())
+}
+
+/// Lock a workspace so cleanup and `git worktree prune` skip it. Refuses the
+/// main worktree (git itself errors on locking it). Output goes to stderr only.
+pub fn run_lock(workspace: String, reason: Option<String>) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let target = fuzzy_match_worktree(&workspace, &worktrees)
+        .ok_or_else(|| WorkspaceError::NoMatch(workspace.clone()))?;
+
+    if target.is_main {
+        return Err(WorkspaceError::LockMain.into());
+    }
+
+    let main_root = main_worktree_root(&worktrees)?;
+    git::worktree::lock(&main_root, &target.path, reason.as_deref())
+        .map_err(WorkspaceError::GitError)?;
+
+    eprintln!(
+        "Locked workspace '{}'{}",
+        target.name,
+        reason.map(|r| format!(" ({})", r)).unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// Clear the lock on a previously locked workspace. Output goes to stderr only.
+pub fn run_unlock(workspace: String) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let target = fuzzy_match_worktree(&workspace, &worktrees)
+        .ok_or_else(|| WorkspaceError::NoMatch(workspace.clone()))?;
+
+    let main_root = main_worktree_root(&worktrees)?;
+    git::worktree::unlock(&main_root, &target.path).map_err(WorkspaceError::GitError)?;
+
+    eprintln!("Unlocked workspace '{}'", target.name);
+    Ok(())
+}
+
+/// Repair worktree administrative files. With a workspace query, repairs only
+/// that worktree; with no query, repairs all of them. Recovery command, so
+/// output goes to stderr only. Mostly useful after a worktree directory or the
+/// main repository has been moved on disk.
+pub fn run_repair(workspace: Option<String>) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let main_root = main_worktree_root(&worktrees)?;
+
+    let paths: Vec<PathBuf> = match &workspace {
+        Some(q) => {
+            let target = fuzzy_match_worktree(q, &worktrees)
+                .ok_or_else(|| WorkspaceError::NoMatch(q.clone()))?;
+            vec![target.path]
+        }
+        None => Vec::new(),
+    };
+
+    git::worktree::repair(&main_root, &paths).map_err(WorkspaceError::GitError)?;
+
+    match paths.as_slice() {
+        [path] => eprintln!(
+            "Repaired worktree administrative files for {}",
+            path.display()
+        ),
+        _ => eprintln!("Repaired worktree administrative files"),
+    }
+    Ok(())
+}
+
 /// Interactive workspace manager (default when no subcommand is given).
 pub fn run_interactive() -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
@@ -1211,17 +1346,7 @@ fn workspace_path(
 
     let root = root_template.replace("{repo}", &repo_name);
 
-    let root_path = if let Some(home) = home {
-        if root == "~" {
-            home.to_path_buf()
-        } else if let Some(rest) = root.strip_prefix("~/") {
-            home.join(rest)
-        } else {
-            PathBuf::from(&root)
-        }
-    } else {
-        PathBuf::from(&root)
-    };
+    let root_path = expand_home(&root, home);
 
     let base = if root_path.is_absolute() {
         root_path
@@ -1230,6 +1355,31 @@ fn workspace_path(
     };
 
     base.join(name)
+}
+
+/// Expand a leading '~' (or '~/...') in `path` against `home`. When `home` is
+/// unknown the '~' is left untouched and treated as a literal path component.
+fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
+    match home {
+        Some(home) if path == "~" => home.to_path_buf(),
+        Some(home) => match path.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => PathBuf::from(path),
+        },
+        None => PathBuf::from(path),
+    }
+}
+
+/// Resolve a user-supplied move destination to an absolute path: expand a
+/// leading '~', then make relative paths absolute against the current working
+/// directory (matching `git worktree move`'s own relative-path behavior).
+fn resolve_dest_path(input: &str, home: Option<&Path>, cwd: &Path) -> PathBuf {
+    let expanded = expand_home(input, home);
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -1331,6 +1481,46 @@ mod tests {
         // without a home dir, "~/..." is treated as a relative path
         let path = workspace_path(Path::new("/repo"), None, "~/ws", "fix");
         assert_eq!(path, PathBuf::from("/repo/~/ws/fix"));
+    }
+
+    #[test]
+    fn test_expand_home() {
+        let home = Path::new("/home/user");
+        assert_eq!(expand_home("~", Some(home)), PathBuf::from("/home/user"));
+        assert_eq!(
+            expand_home("~/ws/feat", Some(home)),
+            PathBuf::from("/home/user/ws/feat")
+        );
+        // A bare absolute path is untouched.
+        assert_eq!(expand_home("/srv/ws", Some(home)), PathBuf::from("/srv/ws"));
+        // Without a home dir, '~' stays literal.
+        assert_eq!(expand_home("~/ws", None), PathBuf::from("~/ws"));
+    }
+
+    #[test]
+    fn test_resolve_dest_path() {
+        let home = Path::new("/home/user");
+        let cwd = Path::new("/work/cwd");
+
+        // Absolute destination is used as-is.
+        assert_eq!(
+            resolve_dest_path("/srv/ws/moved", Some(home), cwd),
+            PathBuf::from("/srv/ws/moved")
+        );
+        // '~' expands to home and stays absolute.
+        assert_eq!(
+            resolve_dest_path("~/ws/moved", Some(home), cwd),
+            PathBuf::from("/home/user/ws/moved")
+        );
+        // A relative destination resolves against the current working dir.
+        assert_eq!(
+            resolve_dest_path("moved", Some(home), cwd),
+            PathBuf::from("/work/cwd/moved")
+        );
+        assert_eq!(
+            resolve_dest_path("../sibling", Some(home), cwd),
+            PathBuf::from("/work/cwd/../sibling")
+        );
     }
 
     #[test]

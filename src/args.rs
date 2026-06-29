@@ -254,6 +254,42 @@ pub enum WorkspaceCommands {
 
     /// Copy setup files (e.g. .env) from the main worktree into this workspace
     Setup,
+
+    /// Print the main worktree root (for use in scripts, e.g. cd "$(gx workspace root)")
+    Root,
+
+    /// Move a workspace to a new path
+    #[command(alias = "mv")]
+    Move {
+        /// Workspace to move (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+
+        /// New path for the workspace (relative paths resolve against the
+        /// current directory; '~' is expanded)
+        new_path: String,
+    },
+
+    /// Lock a workspace so cleanup and 'git worktree prune' skip it
+    Lock {
+        /// Workspace to lock (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+
+        /// Optional reason recorded by git and shown in 'git worktree list --verbose'
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Unlock a previously locked workspace
+    Unlock {
+        /// Workspace to unlock (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+    },
+
+    /// Repair worktree administrative files (recovery for moved or damaged worktrees)
+    Repair {
+        /// Workspace to repair (repairs all worktrees when omitted)
+        workspace: Option<String>,
+    },
 }
 
 impl Commands {
@@ -331,6 +367,20 @@ impl Commands {
                     delete_branch,
                 }) => commands::workspace::run_remove(query, force, delete_branch),
                 Some(WorkspaceCommands::Setup) => commands::workspace::run_setup(),
+                Some(WorkspaceCommands::Root) => commands::workspace::run_root(),
+                Some(WorkspaceCommands::Move {
+                    workspace,
+                    new_path,
+                }) => commands::workspace::run_move(workspace, new_path),
+                Some(WorkspaceCommands::Lock { workspace, reason }) => {
+                    commands::workspace::run_lock(workspace, reason)
+                }
+                Some(WorkspaceCommands::Unlock { workspace }) => {
+                    commands::workspace::run_unlock(workspace)
+                }
+                Some(WorkspaceCommands::Repair { workspace }) => {
+                    commands::workspace::run_repair(workspace)
+                }
             },
             Commands::Pr { action } => match action {
                 None => commands::pr::run_interactive(),
