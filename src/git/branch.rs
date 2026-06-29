@@ -3,18 +3,26 @@ use std::collections::HashSet;
 
 use super::{GitError, get_repo};
 
+/// `repo.branches(kind)` with the successful entries collected, treating an
+/// unborn HEAD (a repo with no commits yet) as "no branches" rather than an
+/// error. Shared by every branch-enumeration helper below.
+fn branches_or_empty(
+    repo: &git2::Repository,
+    kind: Option<git2::BranchType>,
+) -> Result<Vec<(git2::Branch<'_>, git2::BranchType)>, GitError> {
+    match repo.branches(kind) {
+        Ok(iter) => Ok(iter.filter_map(Result::ok).collect()),
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub fn get_branches() -> Result<Vec<String>, GitError> {
     let repo = get_repo()?;
     let mut seen = HashSet::new();
 
-    let branches_iter = match repo.branches(None) {
-        Ok(iter) => iter,
-        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(vec![]),
-        Err(e) => return Err(e.into()),
-    };
-
-    let names = branches_iter
-        .filter_map(|res| res.ok())
+    let names = branches_or_empty(&repo, None)?
+        .into_iter()
         .filter_map(|(branch, branch_type)| {
             let shorthand = branch.get().shorthand()?;
 
@@ -52,14 +60,8 @@ pub fn get_remote_branches() -> Result<Vec<String>, GitError> {
     let repo = get_repo()?;
     let mut seen = HashSet::new();
 
-    let branches_iter = match repo.branches(Some(git2::BranchType::Remote)) {
-        Ok(iter) => iter,
-        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(vec![]),
-        Err(e) => return Err(e.into()),
-    };
-
-    let names = branches_iter
-        .filter_map(|res| res.ok())
+    let names = branches_or_empty(&repo, Some(git2::BranchType::Remote))?
+        .into_iter()
         .filter_map(|(branch, _)| {
             let shorthand = branch.get().shorthand()?;
             // skip symbolic refs like origin/HEAD, they are not real branches
@@ -76,6 +78,64 @@ pub fn get_remote_branches() -> Result<Vec<String>, GitError> {
         .collect();
 
     Ok(names)
+}
+
+/// Enumerate local branch shorthands (full names, including any '/').
+pub fn get_local_branches() -> Result<Vec<String>, GitError> {
+    let repo = get_repo()?;
+    let names = branches_or_empty(&repo, Some(git2::BranchType::Local))?
+        .into_iter()
+        .filter_map(|(branch, _)| branch.get().shorthand().map(|s| s.to_string()))
+        .collect();
+    Ok(names)
+}
+
+/// Find a remote-tracking branch matching `branch_name` (e.g. "origin/feature"
+/// for "feature"), preferring "origin" when multiple remotes have it.
+pub fn find_remote_branch(branch_name: &str) -> Result<Option<String>, GitError> {
+    let repo = get_repo()?;
+
+    let mut found: Vec<String> = branches_or_empty(&repo, Some(git2::BranchType::Remote))?
+        .into_iter()
+        .filter_map(|(branch, _)| branch.get().shorthand().map(|s| s.to_string()))
+        .filter(|shorthand| {
+            shorthand
+                .split_once('/')
+                .is_some_and(|(_, tail)| tail == branch_name)
+        })
+        .collect();
+
+    // origin first, then alphabetical — compared by borrow to avoid cloning keys.
+    found.sort_by(|a, b| {
+        (!a.starts_with("origin/"), a.as_str()).cmp(&(!b.starts_with("origin/"), b.as_str()))
+    });
+    Ok(found.into_iter().next())
+}
+
+/// Default branch of the 'origin' remote (e.g. "origin/main"), resolved from
+/// 'refs/remotes/origin/HEAD' with a fallback to origin/main or origin/master.
+/// Returns None when there is no origin remote.
+pub fn default_remote_branch() -> Result<Option<String>, GitError> {
+    let repo = get_repo()?;
+
+    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Some(target) = head.symbolic_target()
+        && let Some(branch) = target.strip_prefix("refs/remotes/")
+    {
+        return Ok(Some(branch.to_string()));
+    }
+
+    // origin/HEAD is only set on clone; fall back to common default names
+    for candidate in ["origin/main", "origin/master"] {
+        if repo
+            .find_branch(candidate, git2::BranchType::Remote)
+            .is_ok()
+        {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 pub fn checkout_branch(branch_name: &str) -> Result<(), GitError> {

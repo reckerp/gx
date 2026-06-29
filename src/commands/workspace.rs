@@ -324,12 +324,12 @@ fn create_workspace(name: &str, opts: &NewWorkspaceOptions) -> Result<PathBuf> {
         let base = match &opts.base {
             Some(base) => Some(base.clone()),
             None => {
-                tracking_remote = git::worktree::find_remote_branch(&branch_name)
+                tracking_remote = git::branch::find_remote_branch(&branch_name)
                     .map_err(WorkspaceError::GitError)?;
                 match tracking_remote.clone() {
                     Some(remote) => Some(remote),
                     None => {
-                        default_base = git::worktree::default_remote_branch()
+                        default_base = git::branch::default_remote_branch()
                             .map_err(WorkspaceError::GitError)?;
                         default_base.clone()
                     }
@@ -1236,7 +1236,7 @@ fn update_worktrees(worktrees_to_update: &[Worktree], base: Option<String>) -> R
 
     let base = match base {
         Some(base) => base,
-        None => git::worktree::default_remote_branch()
+        None => git::branch::default_remote_branch()
             .map_err(WorkspaceError::GitError)?
             .ok_or(WorkspaceError::NoBase)?,
     };

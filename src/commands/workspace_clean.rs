@@ -74,7 +74,7 @@ fn build_protection_set(
 fn resolve_protected(cfg: &Config, worktrees: &[Worktree]) -> ProtectionSet {
     // origin's default branch comes back as "origin/main"; protect the local
     // branch name, so strip the remote prefix.
-    let default_branch = git::worktree::default_remote_branch()
+    let default_branch = git::branch::default_remote_branch()
         .ok()
         .flatten()
         .map(|remote| strip_remote_prefix(&remote).to_string());
@@ -532,7 +532,7 @@ fn is_implicitly_protected(branch: &str) -> bool {
         return true;
     }
 
-    let default_branch = git::worktree::default_remote_branch()
+    let default_branch = git::branch::default_remote_branch()
         .ok()
         .flatten()
         .map(|remote| strip_remote_prefix(&remote).to_string());

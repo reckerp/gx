@@ -831,70 +831,6 @@ pub fn branch_exists(branch_name: &str) -> Result<bool, GitError> {
         .is_ok())
 }
 
-/// Find a remote-tracking branch matching `branch_name` (e.g. "origin/feature"
-/// for "feature"), preferring "origin" when multiple remotes have it.
-pub fn find_remote_branch(branch_name: &str) -> Result<Option<String>, GitError> {
-    let repo = get_repo()?;
-
-    let mut found: Vec<String> = repo
-        .branches(Some(git2::BranchType::Remote))?
-        .filter_map(|res| res.ok())
-        .filter_map(|(branch, _)| branch.get().shorthand().map(|s| s.to_string()))
-        .filter(|shorthand| {
-            shorthand
-                .split_once('/')
-                .is_some_and(|(_, tail)| tail == branch_name)
-        })
-        .collect();
-
-    found.sort_by_key(|r| (!r.starts_with("origin/"), r.clone()));
-    Ok(found.into_iter().next())
-}
-
-/// Default branch of the 'origin' remote (e.g. "origin/main"), resolved from
-/// 'refs/remotes/origin/HEAD' with a fallback to origin/main or origin/master.
-/// Returns None when there is no origin remote.
-pub fn default_remote_branch() -> Result<Option<String>, GitError> {
-    let repo = get_repo()?;
-
-    if let Ok(head) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Some(target) = head.symbolic_target()
-        && let Some(branch) = target.strip_prefix("refs/remotes/")
-    {
-        return Ok(Some(branch.to_string()));
-    }
-
-    // origin/HEAD is only set on clone; fall back to common default names
-    for candidate in ["origin/main", "origin/master"] {
-        if repo
-            .find_branch(candidate, git2::BranchType::Remote)
-            .is_ok()
-        {
-            return Ok(Some(candidate.to_string()));
-        }
-    }
-
-    Ok(None)
-}
-
-/// Enumerate local branch shorthands (full names, including any '/').
-pub fn list_local_branches() -> Result<Vec<String>, GitError> {
-    let repo = get_repo()?;
-
-    let branches_iter = match repo.branches(Some(git2::BranchType::Local)) {
-        Ok(iter) => iter,
-        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(vec![]),
-        Err(e) => return Err(e.into()),
-    };
-
-    let names = branches_iter
-        .filter_map(|res| res.ok())
-        .filter_map(|(branch, _)| branch.get().shorthand().map(|s| s.to_string()))
-        .collect();
-
-    Ok(names)
-}
-
 /// True when the local branch `branch` has a configured upstream.
 pub fn has_upstream(branch: &str) -> Result<bool, GitError> {
     let repo = get_repo()?;
@@ -905,25 +841,10 @@ pub fn has_upstream(branch: &str) -> Result<bool, GitError> {
 /// Number of commits the local branch `branch` is ahead of its upstream.
 /// Returns `Ok(None)` when the branch has no upstream configured (so callers
 /// can distinguish "no upstream" from "0 ahead"). Branch-name variant of the
-/// path-based [`ahead_behind`].
+/// path-based [`ahead_behind`], sharing the single git2 ahead/behind impl in
+/// [`super::branch::get_ahead_behind`].
 pub fn unpushed_count(branch: &str) -> Result<Option<usize>, GitError> {
-    let repo = get_repo()?;
-
-    let local = match repo.find_branch(branch, git2::BranchType::Local) {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
-    };
-
-    let upstream = match local.upstream() {
-        Ok(u) => u,
-        Err(_) => return Ok(None),
-    };
-
-    let local_oid = local.get().peel_to_commit()?.id();
-    let upstream_oid = upstream.get().peel_to_commit()?.id();
-
-    let (ahead, _behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
-    Ok(Some(ahead))
+    Ok(super::branch::get_ahead_behind(branch)?.map(|(ahead, _behind)| ahead))
 }
 
 /// True when `branch` has an upstream and is ahead of it. A branch with no
@@ -1001,7 +922,7 @@ pub struct OrphanBranch {
 /// Local branches with no associated worktree, each annotated with its
 /// unpushed/upstream state.
 pub fn orphan_branches(worktrees: &[Worktree]) -> Result<Vec<OrphanBranch>, GitError> {
-    let all_local = list_local_branches()?;
+    let all_local = super::branch::get_local_branches()?;
     let candidates = branches_without_worktree(&all_local, worktrees);
 
     candidates
