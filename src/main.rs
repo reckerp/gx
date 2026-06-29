@@ -5,6 +5,7 @@ mod clipboard;
 mod commands;
 mod config;
 mod git;
+mod output;
 mod repo_config;
 mod repo_setup;
 mod ui;

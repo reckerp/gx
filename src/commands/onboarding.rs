@@ -1,4 +1,6 @@
-use crate::git::{self, GitError, worktree::Worktree};
+use crate::commands::workspace::main_worktree_root;
+use crate::git::{self, GitError};
+use crate::output;
 use crate::repo_config::{self, RepoConfigFile, RepoWorkspaceSection};
 use crate::repo_setup;
 use crate::ui;
@@ -28,7 +30,7 @@ pub fn run() -> Result<()> {
     .map_err(|e| OnboardingError::TuiError(e.to_string()))?;
 
     let Some(copy_files) = selected? else {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     };
 
@@ -131,12 +133,4 @@ fn save_shared(
     }
 
     Ok(())
-}
-
-fn main_worktree_root(worktrees: &[Worktree]) -> Result<std::path::PathBuf, OnboardingError> {
-    worktrees
-        .iter()
-        .find(|w| w.is_main)
-        .map(|w| w.path.clone())
-        .ok_or(OnboardingError::GitError(GitError::NotInRepo))
 }

@@ -54,7 +54,7 @@ pub fn run(
 /// Emit dynamic completion candidates for the generated shell helpers. Invoked
 /// by `main` when it intercepts `gx __complete <kind>` (deliberately not a clap
 /// subcommand; see `CompleteKind`). This is the one place a completion-backing
-/// path writes data to STDOUT (analogous to `print_go_path`): the shell
+/// path writes data to STDOUT (analogous to `crate::output::nav_path`): the shell
 /// completion machinery reads it directly.
 ///
 /// Errors (e.g. not inside a repo) print nothing and exit 0 so completion never

@@ -1,4 +1,5 @@
 use crate::git;
+use crate::output;
 use crate::git::GitError;
 use crate::ui;
 use miette::{Diagnostic, Result};
@@ -67,7 +68,7 @@ fn run_interactive() -> Result<()> {
             }
         }
         None => {
-            println!("Cancelled.");
+            output::cancelled();
         }
     }
 

@@ -5,6 +5,7 @@
 //! and a confirmation before running against a PR you did not author.
 
 use crate::ai;
+use crate::output;
 use crate::commands::workspace;
 use crate::config::{self, Config};
 use crate::git::pr_actions::MergeMethod;
@@ -98,7 +99,7 @@ pub fn run_interactive() -> Result<()> {
 
     match result? {
         None => {
-            eprintln!("Cancelled");
+            output::cancelled();
             Ok(())
         }
         Some(PrAction::OpenWorkspace(pr)) => open_workspace(&pr),
@@ -128,7 +129,7 @@ fn open_workspace(pr: &DashboardPr) -> Result<()> {
     }
     eprintln!("Opening workspace for #{} on '{}'…", pr.number, branch);
     let path = workspace::ensure_workspace_for_branch(&branch)?;
-    workspace::print_go_path(&path);
+    output::nav_path(&path);
     Ok(())
 }
 
@@ -151,7 +152,7 @@ will be treated as untrusted input.",
             pr.number, pr.author
         ))?;
         if !confirmed {
-            eprintln!("Cancelled");
+            output::cancelled();
             return Ok(());
         }
     }

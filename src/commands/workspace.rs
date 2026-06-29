@@ -2,7 +2,7 @@ use crate::git::{self, GitError, worktree::Worktree};
 use crate::repo_setup::ScriptRun;
 use crate::ui;
 use crate::ui::workspace_picker::WorkspaceAction;
-use crate::{config, repo_config, repo_setup};
+use crate::{config, output, repo_config, repo_setup};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::{Diagnostic, Result};
 use std::collections::HashSet;
@@ -196,7 +196,7 @@ pub fn run_new(name: String, mut opts: NewWorkspaceOptions) -> Result<()> {
         // already reported on stderr by create_workspace.
         eprintln!("Staying in the current workspace (--no-cd)");
     } else {
-        print_go_path(&path);
+        output::nav_path(&path);
     }
     Ok(())
 }
@@ -552,7 +552,7 @@ fn copy_staged_into(filter: &[String], dest_root: &Path) -> Result<(), Workspace
 
     if filtering {
         for missing in &requested {
-            eprintln!("warning: '{}' is not staged; skipping", missing);
+            output::warn(format!("'{}' is not staged; skipping", missing));
         }
     }
 
@@ -670,7 +670,7 @@ pub fn run_go(query: Option<String>) -> Result<()> {
         }
         None => {
             let Some(action) = pick_workspace(&worktrees)? else {
-                eprintln!("Cancelled");
+                output::cancelled();
                 return Ok(());
             };
             match action {
@@ -703,7 +703,7 @@ pub fn run_go(query: Option<String>) -> Result<()> {
     };
 
     eprintln!("Switching to workspace '{}'", target.name);
-    print_go_path(&target.path);
+    output::nav_path(&target.path);
     Ok(())
 }
 
@@ -762,7 +762,7 @@ pub fn run_remove(query: Option<String>, force: bool, delete_branch: bool) -> Re
         ],
         None => {
             let Some(action) = pick_workspace(&worktrees)? else {
-                eprintln!("Cancelled");
+                output::cancelled();
                 return Ok(());
             };
             match action {
@@ -832,11 +832,11 @@ fn fetch_origin() {
         Ok(true) => {
             eprintln!("Fetching origin...");
             if let Err(e) = git::fetch::fetch_remote("origin") {
-                eprintln!("warning: fetch failed ({}); using local refs", e);
+                output::warn(format!("fetch failed ({}); using local refs", e));
             }
         }
         Ok(false) => {}
-        Err(e) => eprintln!("warning: could not check remotes ({})", e),
+        Err(e) => output::warn(format!("could not check remotes ({})", e)),
     }
 }
 
@@ -955,7 +955,7 @@ pub fn run_root() -> Result<()> {
 /// Move a workspace to a new path via `git worktree move`. Refuses the main
 /// worktree and refuses an existing destination. Human-readable output goes to
 /// stderr; nothing is written to stdout unless the CURRENT workspace is moved,
-/// in which case the new path is emitted via [`print_go_path`] so the shell
+/// in which case the new path is emitted via [`crate::output::nav_path`] so the shell
 /// wrapper follows the user into it (mirroring the current-workspace handling
 /// in [`remove_worktrees`]).
 pub fn run_move(workspace: String, new_path: String) -> Result<()> {
@@ -982,7 +982,7 @@ pub fn run_move(workspace: String, new_path: String) -> Result<()> {
 
     if target.is_current {
         eprintln!("Switching to moved workspace");
-        print_go_path(&dest);
+        output::nav_path(&dest);
     }
 
     Ok(())
@@ -1073,14 +1073,14 @@ pub fn run_interactive() -> Result<()> {
     let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
 
     let Some(action) = pick_workspace(&worktrees)? else {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     };
 
     match action {
         WorkspaceAction::Go(w) => {
             eprintln!("Switching to workspace '{}'", w.name);
-            print_go_path(&w.path);
+            output::nav_path(&w.path);
             Ok(())
         }
         WorkspaceAction::Remove {
@@ -1130,7 +1130,7 @@ fn create_from_picker(name: String) -> Result<()> {
     };
 
     if name.is_empty() {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     }
 
@@ -1366,7 +1366,7 @@ fn remove_worktrees(
         let prompt = remove_prompt(&targets, delete_branches);
         let confirmed = ui::confirm::run_on_stderr(&prompt)?;
         if !confirmed {
-            eprintln!("Cancelled");
+            output::cancelled();
             return Ok(());
         }
     }
@@ -1423,7 +1423,7 @@ fn remove_worktrees(
     // main workspace via the shell wrapper.
     if removes_current {
         eprintln!("Switching to main workspace");
-        print_go_path(&main_root);
+        output::nav_path(&main_root);
     }
     Ok(())
 }
@@ -1434,7 +1434,7 @@ fn confirm_force_remove(worktree: &Worktree) -> Result<bool> {
         worktree.name
     ))?;
     if !confirmed {
-        eprintln!("Cancelled");
+        output::cancelled();
     }
     Ok(confirmed)
 }
@@ -1496,47 +1496,25 @@ fn remove_prompt(worktrees_to_remove: &[Worktree], delete_branches: bool) -> Str
         };
     }
 
-    let mut lines = vec![if delete_branches {
+    let mut header = if delete_branches {
         format!(
             "Remove {} workspaces and delete their local branches?",
             worktrees_to_remove.len()
         )
     } else {
         format!("Remove {} workspaces?", worktrees_to_remove.len())
-    }];
+    };
     if worktrees_to_remove.iter().any(|w| w.is_current) {
-        lines.push(
-            "The current workspace is selected; you will be moved to the main workspace."
-                .to_string(),
+        header.push_str(
+            "\nThe current workspace is selected; you will be moved to the main workspace.",
         );
     }
-    lines.push(String::new());
-    lines.extend(
+    output::bulleted_prompt(
+        header,
         worktrees_to_remove
             .iter()
-            .map(|w| format!("  - {} ({})", w.name, w.path.display())),
-    );
-    lines.join("\n")
-}
-
-/// Print the path the shell wrapper should cd into. This is the only thing
-/// workspace commands (and the PR dashboard's workspace actions) write to stdout.
-pub(crate) fn print_go_path(path: &Path) {
-    use std::io::IsTerminal;
-
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    println!("{}", path.display());
-
-    // When stdout is a terminal, the output is not being captured by the
-    // shell wrapper from 'gx setup', so gx cannot cd for the user.
-    if io::stdout().is_terminal() {
-        eprintln!();
-        eprintln!("hint: gx printed the path but could not cd for you.");
-        eprintln!(
-            "      Add 'eval \"$(gx setup)\"' to your shell config (and use 'gx' from your PATH,"
-        );
-        eprintln!("      not './gx') to switch workspaces automatically.");
-    }
+            .map(|w| format!("{} ({})", w.name, w.path.display())),
+    )
 }
 
 pub(crate) fn main_worktree_root(worktrees: &[Worktree]) -> Result<PathBuf, WorkspaceError> {

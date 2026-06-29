@@ -1,4 +1,5 @@
 use crate::commands::workspace::{delete_local_branch, main_worktree_root};
+use crate::output;
 use crate::config::{self, Config};
 use crate::git::time::now_secs;
 use crate::git::worktree::{OrphanBranch, Worktree, WorktreeSummary};
@@ -232,7 +233,7 @@ fn run_clean_auto(cfg: &Config, dry_run: bool, use_threshold: bool, force: bool)
 
     let prompt = clean_confirm_prompt(&safe);
     if !ui::confirm::run_on_stderr(&prompt)? {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     }
 
@@ -257,12 +258,11 @@ fn clean_confirm_prompt(safe: &[Worktree]) -> String {
         );
     }
 
-    let mut lines = vec![format!("Remove {} workspace(s)?", safe.len()), String::new()];
-    lines.extend(
+    output::bulleted_prompt(
+        format!("Remove {} workspace(s)?", safe.len()),
         safe.iter()
-            .map(|w| format!("  - {} ({})", w.name, w.path.display())),
-    );
-    lines.join("\n")
+            .map(|w| format!("{} ({})", w.name, w.path.display())),
+    )
 }
 
 fn run_clean_interactive(cfg: &Config) -> Result<()> {
@@ -304,7 +304,7 @@ fn run_clean_interactive(cfg: &Config) -> Result<()> {
     };
 
     let Some(action) = pick_clean(inputs, &worktrees)? else {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     };
 
@@ -368,7 +368,7 @@ fn apply_clean_action(action: &CleanAction, main_root: &Path) -> Result<()> {
 
     if removes_current {
         eprintln!("Switching to main workspace");
-        crate::commands::workspace::print_go_path(main_root);
+        crate::output::nav_path(main_root);
     }
 
     Ok(())
@@ -418,7 +418,7 @@ pub fn run_prune(dry_run: bool, no_branches: bool) -> Result<()> {
 
     let prompt = prune_confirm_prompt(&deletable);
     if !ui::confirm::run_on_stderr(&prompt)? {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     }
 
@@ -445,12 +445,10 @@ fn prunable_branches(orphans: &[OrphanBranch], protection: &ProtectionSet) -> Ve
 }
 
 fn prune_confirm_prompt(branches: &[String]) -> String {
-    let mut lines = vec![
+    output::bulleted_prompt(
         format!("Delete {} orphan branch(es)?", branches.len()),
-        String::new(),
-    ];
-    lines.extend(branches.iter().map(|b| format!("  - {}", b)));
-    lines.join("\n")
+        branches.iter().cloned(),
+    )
 }
 
 /// `gx workspace protect [branch]`.

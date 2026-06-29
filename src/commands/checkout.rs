@@ -1,4 +1,5 @@
 use crate::git::{GitError, branch, commit, fetch, github};
+use crate::output;
 use crate::ui;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use miette::{Diagnostic, Result};
@@ -83,7 +84,7 @@ pub fn run(create_branch: Option<String>, query: Option<String>) -> Result<()> {
             match selection? {
                 Some(branch) => CheckoutTarget::Branch(branch),
                 None => {
-                    println!("Checkout cancelled.");
+                    output::cancelled();
                     return Ok(());
                 }
             }
