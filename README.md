@@ -79,7 +79,7 @@ cargo run -- <arguments>
 | `workspace`| `ws`           | Manage workspaces (git worktrees)   |
 | `pr`       | `prs`, `pullrequest`, `pullrequests` | Dashboard of your open pull requests|
 | `onboarding`| `onboard`    | Configure repo-specific setup       |
-| `setup`    | -              | Generate shell aliases from config  |
+| `setup`    | -              | Generate shell aliases, cd wrapper, and completions |
 
 ### Checkout
 
@@ -341,13 +341,35 @@ npx vercel link
 
 ### Setup
 
-Generate shell aliases from configuration.
+Generate shell integration: aliases, the workspace `cd` wrapper, and shell
+completions. Supports zsh, bash, and fish.
 
 ```bash
-gx setup
+gx setup                      # auto-detects your shell from $SHELL
+gx setup --shell zsh          # force a specific shell (zsh|bash|fish)
+gx setup --shell bash
+gx setup --shell fish
+gx setup --completions zsh    # emit only the static completion script
+gx setup --name gx-dev --command /path/to/gx   # custom wrapper name/binary
 ```
 
-This also emits the shell wrapper used for the workspace `cd` integration.
+The script emits the aliases from your config, the shell wrapper used for the
+workspace `cd` integration, and a completion hookup. The zsh wrapper uses
+`noglob` so branch-name arguments containing glob characters (e.g.
+`gx workspace remove feat/*` or `gx checkout users/[id]`) are passed through
+literally instead of being expanded by the shell.
+
+Completion is generated via `clap_complete` for command and flag completion,
+plus dynamic helpers for workspace names, branch names, remote branch names,
+and stash refs.
+
+`--name`/`--command` let you install integration for a custom wrapper name
+pointing at a specific binary — useful when developing `gx` locally while
+keeping the installed release available as `gx`:
+
+```bash
+eval "$(gx setup --name gx-dev --command /Users/me/dev/gx/target/debug/gx)"
+```
 
 ### External
 
