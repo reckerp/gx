@@ -263,6 +263,15 @@ gx workspace remove [query] # Remove a workspace (asks for confirmation).
 gx workspace remove <name> --force # Remove even with uncommitted changes
 gx workspace remove <name> --delete-branch # Also delete the local branch
 gx workspace setup         # Re-run setup: copy files, then run setup script
+
+gx workspace sync          # Copy configured setup files from main into the
+                           # current workspace (manual copy tool)
+gx workspace sync <target> # Copy into <target> (workspace name, branch, fuzzy
+                           # query, or absolute path) instead of the current one
+gx workspace sync <target> .env config/local.toml # Copy explicit paths
+gx workspace sync <target> --from staging .env.local # Copy from another source
+gx workspace sync <target> --dry-run               # Print what would be copied
+
 gx workspace root          # Print the main worktree root, e.g. cd "$(gx workspace root)"
 gx workspace move <query> <new-path> # Move a workspace to a new path (refuses the
                                      # main worktree and existing destinations)
@@ -271,6 +280,8 @@ gx workspace lock <query> [--reason <reason>]  # Lock a workspace so cleanup and
 gx workspace unlock <query> # Clear a workspace lock
 gx workspace repair [query] # Repair worktree admin files after a move (all if omitted)
 ```
+
+**`setup` vs `sync`:** `gx workspace setup` applies the configured policy (copy files plus the setup script) for the current workspace. `gx workspace sync` is the manual copy tool: it copies arbitrary paths (defaulting to the configured `copy_files`) from a source workspace (defaulting to the main worktree) into a target workspace (defaulting to the current one). Directories are copied recursively, parent directories are created as needed, and missing source paths are reported without aborting the rest of the sync.
 
 **Interactive TUI** (`gx workspace`): fuzzy search across workspace names and branches, with `enter` to switch and `ctrl+n` to create a workspace named after the current query. The workspace list supports multi-select: `space` toggles a workspace, `ctrl+a` toggles all visible workspaces, and `ctrl+u` clears selections. When GitHub CLI (`gh`) is available, workspace rows show PR badges for open, draft, merged, and closed pull requests. Use `ctrl+d` to remove selected workspaces, or `ctrl+b` to remove them and delete their local branches after an inline confirmation. Bulk actions include `ctrl+r` to update/rebase selected workspaces and `ctrl+t` to re-copy setup files. Press `?` for the full help screen.
 

@@ -35,6 +35,13 @@ pub enum WorkspaceError {
     )]
     AlreadyExists(String, PathBuf),
 
+    #[error("Cannot sync a workspace to itself")]
+    #[diagnostic(
+        code(gx::workspace::sync_same),
+        help("Pass a different --from source or target")
+    )]
+    SameSourceAndTarget,
+
     #[error("Cannot remove the main worktree")]
     #[diagnostic(
         code(gx::workspace::remove_main),
@@ -848,6 +855,92 @@ pub fn run_setup() -> Result<()> {
     setup_worktrees(&[current], &worktrees)
 }
 
+/// Manually copy paths from one workspace to another. Defaults: target =
+/// current workspace, source = main worktree, paths = configured copy files.
+/// All output goes to stderr; nothing is printed to stdout (this command does
+/// not participate in shell navigation).
+pub fn run_sync(
+    target: Option<String>,
+    from: Option<String>,
+    paths: Vec<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let worktrees = git::worktree::list().map_err(WorkspaceError::GitError)?;
+    let main_root = main_worktree_root(&worktrees)?;
+
+    // Resolve target: explicit query, else the current workspace.
+    let target_root = match &target {
+        Some(query) => resolve_worktree_root(query, &worktrees)?,
+        None => git::worktree::current_worktree_root().map_err(WorkspaceError::GitError)?,
+    };
+
+    // Resolve source: explicit query, else the main worktree.
+    let source_root = match &from {
+        Some(query) => resolve_worktree_root(query, &worktrees)?,
+        None => main_root.clone(),
+    };
+
+    if paths_equal(&source_root, &target_root) {
+        return Err(WorkspaceError::SameSourceAndTarget.into());
+    }
+
+    // Determine paths: explicit list, else the configured default copy files
+    // (global config + the repo profile's copy files, deduped) — the same set
+    // workspace creation/setup uses.
+    let patterns = if !paths.is_empty() {
+        paths
+    } else {
+        let cfg = config::load()?;
+        let mut patterns = cfg.workspace.copy_files.clone();
+        patterns.extend(
+            repo_setup::profile_for_repo(&main_root)?
+                .config
+                .copy_files
+                .iter()
+                .cloned(),
+        );
+        let mut seen = HashSet::new();
+        patterns.retain(|p| seen.insert(p.clone()));
+        patterns
+    };
+
+    let outcome = repo_setup::sync_paths(&source_root, &target_root, &patterns, dry_run)?;
+
+    let src_name = worktree_display_name(&source_root, &worktrees);
+    let dst_name = worktree_display_name(&target_root, &worktrees);
+    let suffix = if dry_run { " (dry run)" } else { "" };
+    eprintln!(
+        "Syncing {} path(s) from '{}' to '{}'{}",
+        patterns.len(),
+        src_name,
+        dst_name,
+        suffix
+    );
+
+    for path in &outcome.copied {
+        if dry_run {
+            eprintln!("  would copy {}", path);
+        } else {
+            eprintln!("  copied {}", path);
+        }
+    }
+
+    if outcome.copied.is_empty() {
+        eprintln!("  nothing to copy");
+    }
+
+    // Missing sources are reported but never abort the sync.
+    if !outcome.missing.is_empty() {
+        eprintln!(
+            "warning: {} path(s) not found in source: {}",
+            outcome.missing.len(),
+            outcome.missing.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
 /// Print the main worktree root to STDOUT, for use in scripts and aliases:
 /// `cd "$(gx workspace root)"`. Unlike the navigation commands this is a plain
 /// value command, so it emits the canonical path on stdout with no stderr hint.
@@ -893,6 +986,21 @@ pub fn run_move(workspace: String, new_path: String) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Best-effort human-readable name for a worktree root, used only in messages.
+/// Falls back to the final path component when the root is not a registered
+/// worktree (e.g. a bare absolute path).
+fn worktree_display_name(root: &Path, worktrees: &[Worktree]) -> String {
+    worktrees
+        .iter()
+        .find(|w| paths_equal(&w.path, root))
+        .map(|w| w.name.clone())
+        .unwrap_or_else(|| {
+            root.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.display().to_string())
+        })
 }
 
 /// Lock a workspace so cleanup and `git worktree prune` skip it. Refuses the
@@ -1514,6 +1622,30 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Resolve a sync source/target query to a worktree root. Accepts an absolute
+/// path to any worktree root, or to any existing directory; otherwise
+/// fuzzy-matches workspace name/branch using the same matcher as
+/// `gx workspace go`.
+fn resolve_worktree_root(query: &str, worktrees: &[Worktree]) -> Result<PathBuf> {
+    let p = Path::new(query);
+    if p.is_absolute() {
+        // An absolute path that equals a known worktree root resolves to it.
+        if let Some(w) = worktrees.iter().find(|w| paths_equal(&w.path, p)) {
+            return Ok(w.path.clone());
+        }
+        // Otherwise accept the path directly if it exists as a directory; the
+        // spec lists absolute paths as a valid source/target form.
+        if p.is_dir() {
+            return Ok(p.to_path_buf());
+        }
+        return Err(WorkspaceError::NoMatch(query.to_string()).into());
+    }
+
+    fuzzy_match_worktree(query, worktrees)
+        .map(|w| w.path)
+        .ok_or_else(|| WorkspaceError::NoMatch(query.to_string()).into())
+}
+
 fn fuzzy_match_worktree(query: &str, worktrees: &[Worktree]) -> Option<Worktree> {
     let matcher = SkimMatcherV2::default();
 
@@ -1682,6 +1814,87 @@ mod tests {
         assert_eq!(m.name, "custom-dir");
 
         assert!(fuzzy_match_worktree("nonexistent-xyz", &worktrees).is_none());
+    }
+
+    #[test]
+    fn test_resolve_worktree_root_fuzzy_matches_name_or_branch() {
+        let worktrees = vec![
+            worktree("repo", Some("main")),
+            worktree("feat-expose-rationale", Some("feat/expose-rationale")),
+        ];
+
+        // Branch-form query resolves to the workspace root.
+        let root = resolve_worktree_root("feat/expose-rationale", &worktrees).unwrap();
+        assert_eq!(root, PathBuf::from("/ws/feat-expose-rationale"));
+
+        // Name-form query resolves the same.
+        let root = resolve_worktree_root("feat-expose-rationale", &worktrees).unwrap();
+        assert_eq!(root, PathBuf::from("/ws/feat-expose-rationale"));
+    }
+
+    #[test]
+    fn test_resolve_worktree_root_rejects_unknown_query() {
+        let worktrees = vec![worktree("repo", Some("main"))];
+        let err = resolve_worktree_root("nonexistent-xyz", &worktrees).unwrap_err();
+        assert!(err.to_string().contains("nonexistent-xyz"));
+    }
+
+    #[test]
+    fn test_resolve_worktree_root_accepts_absolute_worktree_path() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-resolve-abs-known-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut wt = worktree("feature", Some("feature"));
+        wt.path = tmp.clone();
+        let worktrees = vec![wt];
+
+        let root = resolve_worktree_root(tmp.to_str().unwrap(), &worktrees).unwrap();
+        assert!(paths_equal(&root, &tmp));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_resolve_worktree_root_accepts_absolute_dir_not_registered() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-resolve-abs-unknown-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // No worktree registered at this path, but it is a real directory.
+        let worktrees = vec![worktree("repo", Some("main"))];
+        let root = resolve_worktree_root(tmp.to_str().unwrap(), &worktrees).unwrap();
+        assert_eq!(root, tmp);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_resolve_worktree_root_rejects_absolute_nonexistent_path() {
+        let worktrees = vec![worktree("repo", Some("main"))];
+        let missing = "/this/path/should/not/exist/gx-test-xyz";
+        let err = resolve_worktree_root(missing, &worktrees).unwrap_err();
+        assert!(err.to_string().contains(missing));
+    }
+
+    #[test]
+    fn test_self_sync_guard_via_paths_equal() {
+        // run_sync refuses when resolved source and target are the same root;
+        // this verifies the comparison primitive it relies on.
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-self-sync-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(paths_equal(&tmp, &tmp));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
