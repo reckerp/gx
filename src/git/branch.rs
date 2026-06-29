@@ -46,6 +46,38 @@ pub fn get_branches() -> Result<Vec<String>, GitError> {
     Ok(names)
 }
 
+/// Remote-tracking branches as `remote/branch` shorthands (e.g.
+/// "origin/main"), excluding symbolic refs like `origin/HEAD`.
+pub fn get_remote_branches() -> Result<Vec<String>, GitError> {
+    let repo = get_repo()?;
+    let mut seen = HashSet::new();
+
+    let branches_iter = match repo.branches(Some(git2::BranchType::Remote)) {
+        Ok(iter) => iter,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    };
+
+    let names = branches_iter
+        .filter_map(|res| res.ok())
+        .filter_map(|(branch, _)| {
+            let shorthand = branch.get().shorthand()?;
+            // skip symbolic refs like origin/HEAD, they are not real branches
+            if shorthand.ends_with("/HEAD") {
+                return None;
+            }
+            let name = shorthand.to_string();
+            if seen.insert(name.clone()) {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(names)
+}
+
 pub fn checkout_branch(branch_name: &str) -> Result<(), GitError> {
     git_exec::exec(
         vec!["checkout".to_string(), branch_name.to_string()],

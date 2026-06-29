@@ -1,6 +1,52 @@
 use crate::commands;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::Result;
+
+/// Shells `gx setup` can generate integration for. A local enum (rather than
+/// re-exporting `clap_complete::Shell`) keeps the advertised set to the three
+/// shells we actually support; `to_clap_complete` maps to the wider enum for
+/// static completion generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ShellKind {
+    Zsh,
+    Bash,
+    Fish,
+}
+
+impl ShellKind {
+    pub fn to_clap_complete(self) -> clap_complete::Shell {
+        match self {
+            ShellKind::Zsh => clap_complete::Shell::Zsh,
+            ShellKind::Bash => clap_complete::Shell::Bash,
+            ShellKind::Fish => clap_complete::Shell::Fish,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShellKind::Zsh => "zsh",
+            ShellKind::Bash => "bash",
+            ShellKind::Fish => "fish",
+        }
+    }
+}
+
+/// Kinds of dynamic completion candidates the generated shell helpers can
+/// request via the hidden `gx __complete <kind>` invocation.
+///
+/// `__complete` is intentionally NOT a clap subcommand: clap_complete emits
+/// every subcommand (even `hide = true` ones) into the static completion
+/// script, which would surface the internal helper as a visible `gx <TAB>`
+/// candidate. Instead `main` intercepts `__complete <kind>` before clap parses,
+/// keeping it out of the command tree entirely while still backing the
+/// generated dynamic completion helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompleteKind {
+    Workspaces,
+    Branches,
+    RemoteBranches,
+    Stashes,
+}
 
 #[derive(Parser)]
 #[command(name = "gx", about = "GX - Smart Git CLI", version)]
@@ -101,8 +147,24 @@ pub enum Commands {
     #[command(alias = "onboard")]
     Onboarding,
 
-    /// Generate shell aliases from config
-    Setup,
+    /// Generate shell aliases, the cd wrapper, and completions
+    Setup {
+        /// Shell to generate integration for (auto-detected from $SHELL when omitted)
+        #[arg(long, value_enum)]
+        shell: Option<ShellKind>,
+
+        /// Emit only the static completion script for the given shell, then exit
+        #[arg(long, value_enum)]
+        completions: Option<ShellKind>,
+
+        /// Name of the generated wrapper function/alias prefix (default: gx)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Path/name of the real gx binary the wrapper invokes (default: gx)
+        #[arg(long)]
+        command: Option<String>,
+    },
 
     /// Pass-through to git for unrecognized commands
     #[command(external_subcommand)]
@@ -188,6 +250,31 @@ pub enum WorkspaceCommands {
         /// Skip copying setup files (e.g. .env) into the new workspace
         #[arg(long)]
         no_setup: bool,
+
+        /// Create the workspace but do not request shell navigation
+        #[arg(long)]
+        no_cd: bool,
+
+        /// Skip fetching origin; resolve the base from local refs only
+        #[arg(long)]
+        no_fetch: bool,
+
+        /// Copy staged file contents from the current workspace into the new
+        /// one (optionally limited to PATHS)
+        #[arg(long, num_args = 0.., value_name = "PATH")]
+        from_staged: Option<Vec<String>>,
+
+        /// Skip workspace creation hooks
+        #[arg(long)]
+        no_hooks: bool,
+
+        /// Create the workspace with a detached HEAD instead of a new branch
+        #[arg(long, conflicts_with_all = ["branch", "track"])]
+        detach: bool,
+
+        /// Set the base's remote branch as the new branch's upstream
+        #[arg(long)]
+        track: bool,
     },
 
     /// Switch to a workspace (prints its path; cd handled by 'gx setup' shell wrapper)
@@ -203,7 +290,7 @@ pub enum WorkspaceCommands {
 
     /// Update a workspace: fetch origin and rebase its branch onto
     /// origin's default branch (e.g. origin/main)
-    #[command(alias = "up", alias = "sync")]
+    #[command(alias = "up")]
     Update {
         /// Workspace to update (defaults to the current one)
         query: Option<String>,
@@ -275,6 +362,63 @@ pub enum WorkspaceCommands {
         /// Branch to unprotect (defaults to the current branch)
         branch: Option<String>,
     },
+
+    /// Copy files/directories between two workspaces (manual copy tool).
+    /// Defaults: target = current workspace, source = main worktree,
+    /// paths = configured setup copy files.
+    Sync {
+        /// Target workspace: workspace name, branch, fuzzy query, or absolute
+        /// path. Defaults to the current workspace.
+        target: Option<String>,
+
+        /// Paths to copy (repo-relative). Defaults to configured copy_files.
+        paths: Vec<String>,
+
+        /// Source workspace (same resolution as target). Defaults to the main
+        /// worktree.
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Print what would be copied without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Print the main worktree root (for use in scripts, e.g. cd "$(gx workspace root)")
+    Root,
+
+    /// Move a workspace to a new path
+    #[command(alias = "mv")]
+    Move {
+        /// Workspace to move (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+
+        /// New path for the workspace (relative paths resolve against the
+        /// current directory; '~' is expanded)
+        new_path: String,
+    },
+
+    /// Lock a workspace so cleanup and 'git worktree prune' skip it
+    Lock {
+        /// Workspace to lock (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+
+        /// Optional reason recorded by git and shown in 'git worktree list --verbose'
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Unlock a previously locked workspace
+    Unlock {
+        /// Workspace to unlock (supports fuzzy matching like 'gx workspace go')
+        workspace: String,
+    },
+
+    /// Repair worktree administrative files (recovery for moved or damaged worktrees)
+    Repair {
+        /// Workspace to repair (repairs all worktrees when omitted)
+        workspace: Option<String>,
+    },
 }
 
 impl Commands {
@@ -321,7 +465,26 @@ impl Commands {
                     base,
                     branch,
                     no_setup,
-                }) => commands::workspace::run_new(name, base, branch, no_setup),
+                    no_cd,
+                    no_fetch,
+                    from_staged,
+                    no_hooks,
+                    detach,
+                    track,
+                }) => commands::workspace::run_new(
+                    name,
+                    commands::workspace::NewWorkspaceOptions {
+                        base,
+                        branch,
+                        no_setup,
+                        no_cd,
+                        no_fetch,
+                        from_staged,
+                        no_hooks,
+                        detach,
+                        track,
+                    },
+                ),
                 Some(WorkspaceCommands::Go { query }) => commands::workspace::run_go(query),
                 Some(WorkspaceCommands::List) => commands::workspace::run_list(),
                 Some(WorkspaceCommands::Update { query, base }) => {
@@ -349,12 +512,37 @@ impl Commands {
                 Some(WorkspaceCommands::Unprotect { branch }) => {
                     commands::workspace_clean::run_unprotect(branch)
                 }
+                Some(WorkspaceCommands::Sync {
+                    target,
+                    paths,
+                    from,
+                    dry_run,
+                }) => commands::workspace::run_sync(target, from, paths, dry_run),
+                Some(WorkspaceCommands::Root) => commands::workspace::run_root(),
+                Some(WorkspaceCommands::Move {
+                    workspace,
+                    new_path,
+                }) => commands::workspace::run_move(workspace, new_path),
+                Some(WorkspaceCommands::Lock { workspace, reason }) => {
+                    commands::workspace::run_lock(workspace, reason)
+                }
+                Some(WorkspaceCommands::Unlock { workspace }) => {
+                    commands::workspace::run_unlock(workspace)
+                }
+                Some(WorkspaceCommands::Repair { workspace }) => {
+                    commands::workspace::run_repair(workspace)
+                }
             },
             Commands::Pr { action } => match action {
                 None => commands::pr::run_interactive(),
                 Some(PrCommands::List) => commands::pr::run_list(),
             },
-            Commands::Setup => commands::setup::run(),
+            Commands::Setup {
+                shell,
+                completions,
+                name,
+                command,
+            } => commands::setup::run(shell, completions, name, command),
         }
     }
 }

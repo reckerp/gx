@@ -179,6 +179,73 @@ pub fn copy_setup_files(
     Ok(copied)
 }
 
+/// Outcome of a [`sync_paths`] run.
+#[derive(Debug, Default)]
+pub struct CopyOutcome {
+    /// Repo-relative paths actually copied (or, in dry-run, that would be
+    /// copied), deduped and in pattern order.
+    pub copied: Vec<String>,
+    /// Requested patterns/paths that matched nothing in the source.
+    pub missing: Vec<String>,
+}
+
+/// Like [`copy_setup_files`], but records patterns that matched no source path
+/// (instead of silently skipping) and supports a no-write dry run.
+///
+/// Patterns are repository-relative globs (same semantics as
+/// [`copy_setup_files`]); directories are copied recursively and parent
+/// directories are created as needed. When `dry_run` is true, matches are
+/// still resolved and recorded but no files are written.
+pub fn sync_paths(
+    src_root: &Path,
+    dst_root: &Path,
+    patterns: &[String],
+    dry_run: bool,
+) -> Result<CopyOutcome> {
+    let mut outcome = CopyOutcome::default();
+    let mut copied_set = HashSet::new();
+
+    for pattern in patterns {
+        let normalized = normalize_pattern(pattern)?;
+        if normalized.is_empty() {
+            continue;
+        }
+
+        let matches = matched_paths(src_root, &normalized)?;
+        if matches.is_empty() {
+            // A literal path that does not exist, or a glob that matched
+            // nothing, is summarized as "missing" rather than silently dropped.
+            outcome.missing.push(pattern.clone());
+            continue;
+        }
+
+        for rel_path in matches {
+            if !copied_set.insert(rel_path.clone()) {
+                continue;
+            }
+
+            if !dry_run {
+                let src = src_root.join(&rel_path);
+                let dst = dst_root.join(&rel_path);
+
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).into_diagnostic()?;
+                }
+
+                if src.is_dir() {
+                    copy_dir_recursive(&src, &dst)?;
+                } else {
+                    std::fs::copy(&src, &dst).into_diagnostic()?;
+                }
+            }
+
+            outcome.copied.push(rel_path);
+        }
+    }
+
+    Ok(outcome)
+}
+
 pub fn open_in_editor(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .ok()
@@ -625,7 +692,7 @@ fn run_setup_script(
 /// stdout clean (it carries the cd target path the shell wrapper consumes).
 /// Prefers `/dev/stderr`, but falls back to a duplicate of the real stderr fd so
 /// a missing/unwritable `/dev/stderr` doesn't abort an otherwise-runnable script.
-fn stderr_stdio() -> Result<Stdio> {
+pub(crate) fn stderr_stdio() -> Result<Stdio> {
     if let Ok(file) = OpenOptions::new().write(true).open("/dev/stderr") {
         return Ok(Stdio::from(file));
     }
@@ -769,6 +836,148 @@ mod tests {
         );
         assert!(dst.join(".vercel/project.json").exists());
         assert!(!dst.join("missing.txt").exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_sync_paths_copies_files_and_directories() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-sync-paths-copy-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(src.join("config")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(src.join("config/local.toml"), "x = 1").unwrap();
+
+        let patterns = vec![".env".to_string(), "config".to_string()];
+        let outcome = sync_paths(&src, &dst, &patterns, false).unwrap();
+
+        assert_eq!(
+            outcome.copied,
+            vec![".env".to_string(), "config".to_string()]
+        );
+        assert!(outcome.missing.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dst.join(".env")).unwrap(),
+            "SECRET=1"
+        );
+        // Directory copied recursively.
+        assert_eq!(
+            std::fs::read_to_string(dst.join("config/local.toml")).unwrap(),
+            "x = 1"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_sync_paths_creates_parent_dirs() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-sync-paths-parent-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(src.join("nested/deep")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("nested/deep/file.txt"), "data").unwrap();
+
+        let patterns = vec!["nested/deep/file.txt".to_string()];
+        let outcome = sync_paths(&src, &dst, &patterns, false).unwrap();
+
+        assert_eq!(outcome.copied, vec!["nested/deep/file.txt".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(dst.join("nested/deep/file.txt")).unwrap(),
+            "data"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_sync_paths_dry_run_writes_nothing() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-sync-paths-dryrun-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(src.join("config")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(src.join("config/local.toml"), "x = 1").unwrap();
+
+        let patterns = vec![".env".to_string(), "config".to_string()];
+        let outcome = sync_paths(&src, &dst, &patterns, true).unwrap();
+
+        // Reports what *would* be copied...
+        assert_eq!(
+            outcome.copied,
+            vec![".env".to_string(), "config".to_string()]
+        );
+        // ...but writes nothing.
+        assert!(!dst.join(".env").exists());
+        assert!(!dst.join("config").exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_sync_paths_summarizes_missing() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-sync-paths-missing-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".env"), "SECRET=1").unwrap();
+
+        let patterns = vec![
+            ".env".to_string(),
+            "missing.txt".to_string(),
+            "also/missing.toml".to_string(),
+        ];
+        let outcome = sync_paths(&src, &dst, &patterns, false).unwrap();
+
+        assert_eq!(outcome.copied, vec![".env".to_string()]);
+        assert_eq!(
+            outcome.missing,
+            vec!["missing.txt".to_string(), "also/missing.toml".to_string()]
+        );
+        // Missing sources are non-fatal: the present file was still copied.
+        assert!(dst.join(".env").exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_sync_paths_dedupes_overlapping_patterns() {
+        let tmp = std::env::temp_dir().join(format!(
+            "gx-sync-paths-dedupe-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let src = tmp.join("src");
+        let dst = tmp.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join(".env"), "SECRET=1").unwrap();
+
+        // Both patterns resolve to ".env"; it should be listed once.
+        let patterns = vec![".env".to_string(), ".env*".to_string()];
+        let outcome = sync_paths(&src, &dst, &patterns, false).unwrap();
+
+        assert_eq!(outcome.copied, vec![".env".to_string()]);
 
         std::fs::remove_dir_all(&tmp).ok();
     }
