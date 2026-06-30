@@ -82,9 +82,15 @@ fn run_loop(
 
         if event::poll(Duration::from_millis(100)).into_diagnostic()?
             && let Event::Key(key) = event::read().into_diagnostic()?
-            && app.handle_key(key)
         {
-            break;
+            if app.handle_key(key) {
+                break;
+            }
+            // The popup requests an $EDITOR pop-out; the loop owns the terminal
+            // so it (not the App) drives the suspend/resume.
+            if std::mem::take(&mut app.editor_request) {
+                app.run_editor(terminal);
+            }
         }
     }
     // Persist the review (best-effort) so it resumes next launch.
@@ -118,6 +124,7 @@ struct App {
     finish_message: Option<String>,
     key: Option<String>,
     pending_reset: bool,
+    editor_request: bool,
     pending_bracket: Option<char>,
     last_diff_height: usize,
     last_view: ViewMode,
@@ -158,6 +165,7 @@ impl App {
             finish_message: None,
             key,
             pending_reset: false,
+            editor_request: false,
             pending_bracket: None,
             last_diff_height: 1,
             last_view: ViewMode::SideBySide,
@@ -367,6 +375,7 @@ impl App {
                 self.mode = Mode::Normal;
             }
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => self.save_comment(),
+            (KeyCode::Char('e'), KeyModifiers::CONTROL) => self.editor_request = true,
             (KeyCode::Enter, _) => {
                 if let Some(p) = self.popup.as_mut() {
                     p.buffer.push('\n');
@@ -662,6 +671,42 @@ impl App {
             Err(_) => format!("Clipboard tool unavailable — here is the review blob:\n\n{text}"),
         });
         true
+    }
+
+    /// Pop out to `$EDITOR` (or `$VISUAL`) to compose the current comment. The
+    /// loop calls this because it owns the terminal needed to suspend the TUI.
+    fn run_editor(&mut self, terminal: &mut crate::ui::Term) {
+        let Some(buffer) = self.popup.as_ref().map(|p| p.buffer.clone()) else {
+            return;
+        };
+
+        let Ok(editor) = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL")) else {
+            self.status = Some("$EDITOR / $VISUAL not set".into());
+            return;
+        };
+
+        let path =
+            std::env::temp_dir().join(format!("gx-review-comment-{}.md", std::process::id()));
+        if std::fs::write(&path, &buffer).is_err() {
+            self.status = Some("Could not create a temp file for $EDITOR".into());
+            return;
+        }
+
+        let outcome = crate::ui::terminal::suspend(terminal, || {
+            std::process::Command::new(&editor).arg(&path).status()
+        });
+
+        match outcome {
+            Ok(Ok(status)) if status.success() => {
+                if let Ok(contents) = std::fs::read_to_string(&path)
+                    && let Some(p) = self.popup.as_mut()
+                {
+                    p.buffer = contents.trim_end_matches('\n').to_string();
+                }
+            }
+            _ => self.status = Some("$EDITOR did not save; kept your draft".into()),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     fn reset_review(&mut self) {
@@ -972,6 +1017,7 @@ impl App {
             Mode::CommentPopup => &[
                 ("type", "comment"),
                 ("C-s", "save"),
+                ("C-e", "editor"),
                 ("⏎", "newline"),
                 ("esc", "cancel"),
             ],
@@ -1016,7 +1062,7 @@ impl App {
         );
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "Ctrl-s save · ⏎ newline · esc cancel",
+                "Ctrl-s save · Ctrl-e $EDITOR · ⏎ newline · esc cancel",
                 Style::default().fg(Color::DarkGray),
             ))),
             body_help[1],

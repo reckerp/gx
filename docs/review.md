@@ -54,8 +54,8 @@ then `origin/master`).
 | `?` | help overlay |
 | `q` | quit (the review is saved for next time — it does **not** copy) |
 
-Inside the comment popup: type your note, `Ctrl-s` to save, `Enter` for a
-newline, `Esc` to cancel.
+Inside the comment popup: type your note, `Ctrl-s` to save, `Ctrl-e` to compose
+in `$EDITOR` (or `$VISUAL`), `Enter` for a newline, `Esc` to cancel.
 
 > **`q` saves but does not copy.** Pressing `q` keeps your comments for next time
 > but does *not* put anything on the clipboard. Use `F` to hand the review off.
