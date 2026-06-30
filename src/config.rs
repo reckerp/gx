@@ -262,6 +262,7 @@ impl Default for Config {
         aliases.insert("gl".to_string(), "log".to_string());
         aliases.insert("gws".to_string(), "workspace".to_string());
         aliases.insert("gpr".to_string(), "pr".to_string());
+        aliases.insert("grev".to_string(), "review".to_string());
 
         Config {
             aliases,
@@ -304,6 +305,10 @@ mod tests {
         assert_eq!(review.side_by_side_min_width, 120);
         assert_eq!(review.default_mode, "branch");
         assert_eq!(Config::default().review.theme, "base16-ocean.dark");
+        assert_eq!(
+            Config::default().aliases.get("grev").map(String::as_str),
+            Some("review")
+        );
     }
 
     #[test]
