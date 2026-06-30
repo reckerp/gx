@@ -4,3 +4,4 @@
 
 pub mod diff;
 pub mod range;
+pub mod state;

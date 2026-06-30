@@ -1,12 +1,14 @@
-//! The `gx review` TUI: the event loop, layout, and `Mode`/`Focus` dispatch
-//! live here (U4); it composes the diff widget (U4), syntax highlighting (U3),
-//! the file-tree sidebar (U5), and the comment overlay (U6) as units land.
+//! The `gx review` TUI: the event loop, layout, `Mode`/`Focus` dispatch, and
+//! the comment overlay live here. It composes the diff widget + syntax
+//! highlighting (U3/U4); the file-tree sidebar (U5) and persistence (U7) slot in
+//! as those units land.
 
 pub mod diff_view;
 pub mod highlight;
 
 use crate::git::review::diff::ChangedFile;
 use crate::git::review::range::ReviewRange;
+use crate::git::review::state::{Comment, Marks, ReviewState, Side};
 use crate::ui::terminal::with_terminal;
 use crate::ui::{render_help_bar, status_char, status_color};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -23,6 +25,8 @@ const SELECT_BG: Color = Color::Rgb(50, 50, 70);
 
 enum Mode {
     Normal,
+    VisualSelect,
+    CommentPopup,
     Help,
 }
 
@@ -31,6 +35,18 @@ enum Focus {
     #[allow(dead_code)] // Sidebar focus + j/k routing lands with the file tree (U5).
     Sidebar,
     Diff,
+}
+
+/// In-progress comment being composed in the inline popup.
+struct Popup {
+    file: String,
+    side: Side,
+    start_line: usize,
+    end_line: usize,
+    anchor_text: String,
+    buffer: String,
+    /// Index of the comment being edited, or `None` for a new comment.
+    editing: Option<usize>,
 }
 
 /// Launch the review TUI for an already-resolved range and changed-file list.
@@ -70,6 +86,7 @@ struct App {
     selected: usize,
     cache: Vec<Option<RenderedFile>>,
     highlighter: Highlighter,
+    review: ReviewState,
     cursor: usize,
     v_scroll: usize,
     h_scroll: usize,
@@ -78,8 +95,10 @@ struct App {
     show_sidebar: bool,
     mode: Mode,
     focus: Focus,
+    popup: Option<Popup>,
+    select_anchor: Option<usize>,
+    status: Option<String>,
     pending_bracket: Option<char>,
-    // Last-rendered geometry, used by the key handler for paging/clamping.
     last_diff_height: usize,
     last_view: ViewMode,
 }
@@ -93,6 +112,7 @@ impl App {
             selected: 0,
             cache,
             highlighter: Highlighter::new(theme),
+            review: ReviewState::default(),
             cursor: 0,
             v_scroll: 0,
             h_scroll: 0,
@@ -101,13 +121,15 @@ impl App {
             show_sidebar: true,
             mode: Mode::Normal,
             focus: Focus::Diff,
+            popup: None,
+            select_anchor: None,
+            status: None,
             pending_bracket: None,
             last_diff_height: 1,
             last_view: ViewMode::SideBySide,
         }
     }
 
-    /// Build (diff + highlight) the selected file on first view, then cache it.
     fn ensure_current_built(&mut self) -> Result<()> {
         if self.files.is_empty() || self.cache[self.selected].is_some() {
             return Ok(());
@@ -124,6 +146,10 @@ impl App {
 
     fn current(&self) -> Option<&RenderedFile> {
         self.cache.get(self.selected).and_then(|o| o.as_ref())
+    }
+
+    fn current_path(&self) -> Option<&str> {
+        self.files.get(self.selected).map(|f| f.path.as_str())
     }
 
     fn cur_line_count(&self) -> usize {
@@ -147,16 +173,30 @@ impl App {
 
     /// Returns true when the app should quit.
     fn handle_key(&mut self, key: event::KeyEvent) -> bool {
-        if matches!(self.mode, Mode::Help) {
-            if matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
-            ) {
-                self.mode = Mode::Normal;
+        self.status = None;
+        match self.mode {
+            Mode::Help => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+                ) {
+                    self.mode = Mode::Normal;
+                }
+                false
             }
-            return false;
+            Mode::CommentPopup => {
+                self.handle_popup_key(key);
+                false
+            }
+            Mode::VisualSelect => {
+                self.handle_visual_key(key);
+                false
+            }
+            Mode::Normal => self.handle_normal_key(key),
         }
+    }
 
+    fn handle_normal_key(&mut self, key: event::KeyEvent) -> bool {
         // Resolve a pending `]`/`[` chord (vim diff motions ]c / [c).
         if let Some(bracket) = self.pending_bracket.take()
             && key.code == KeyCode::Char('c')
@@ -200,12 +240,60 @@ impl App {
             }
             (KeyCode::Right, _) | (KeyCode::Char('l'), _) => self.h_scroll += 4,
 
+            // Comments.
+            (KeyCode::Char('c'), KeyModifiers::NONE) => self.start_comment_current(),
+            (KeyCode::Char('V'), _) => {
+                self.select_anchor = Some(self.cursor);
+                self.mode = Mode::VisualSelect;
+            }
+            (KeyCode::Enter, _) => self.edit_comment_under_cursor(),
+            (KeyCode::Char('D'), _) => self.delete_comment_under_cursor(),
+
             (KeyCode::Char('v'), _) => self.toggle_view(),
             (KeyCode::Char('b'), _) => self.show_sidebar = !self.show_sidebar,
             (KeyCode::Char('?'), _) => self.mode = Mode::Help,
             _ => {}
         }
         false
+    }
+
+    fn handle_visual_key(&mut self, key: event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.select_anchor = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
+            KeyCode::Char('c') => self.start_comment_selection(),
+            _ => {}
+        }
+    }
+
+    fn handle_popup_key(&mut self, key: event::KeyEvent) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => {
+                self.popup = None;
+                self.mode = Mode::Normal;
+            }
+            (KeyCode::Char('s'), KeyModifiers::CONTROL) => self.save_comment(),
+            (KeyCode::Enter, _) => {
+                if let Some(p) = self.popup.as_mut() {
+                    p.buffer.push('\n');
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some(p) = self.popup.as_mut() {
+                    p.buffer.pop();
+                }
+            }
+            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+                if let Some(p) = self.popup.as_mut() {
+                    p.buffer.push(c);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn page(&self) -> i32 {
@@ -263,6 +351,108 @@ impl App {
         });
     }
 
+    // --- comments ---------------------------------------------------------
+
+    fn start_comment_current(&mut self) {
+        let anchor = self
+            .current()
+            .and_then(|rf| diff_view::anchor_at(rf, self.last_view, self.cursor));
+        match anchor {
+            Some(a) => self.open_popup(a.side, a.line, a.line, a.text),
+            None => self.status = Some("Can't comment on a hunk header / gap line".into()),
+        }
+    }
+
+    fn start_comment_selection(&mut self) {
+        let lo = self.select_anchor.unwrap_or(self.cursor);
+        let span = self
+            .current()
+            .and_then(|rf| diff_view::anchor_span(rf, self.last_view, lo, self.cursor));
+        self.select_anchor = None;
+        match span {
+            Some((side, start, end, text)) => self.open_popup(side, start, end, text),
+            None => {
+                self.mode = Mode::Normal;
+                self.status = Some("Nothing to comment in selection".into());
+            }
+        }
+    }
+
+    fn open_popup(&mut self, side: Side, start: usize, end: usize, anchor_text: String) {
+        let Some(file) = self.current_path().map(str::to_string) else {
+            return;
+        };
+        self.popup = Some(Popup {
+            file,
+            side,
+            start_line: start,
+            end_line: end,
+            anchor_text,
+            buffer: String::new(),
+            editing: None,
+        });
+        self.mode = Mode::CommentPopup;
+    }
+
+    fn edit_comment_under_cursor(&mut self) {
+        let anchor = self
+            .current()
+            .and_then(|rf| diff_view::anchor_at(rf, self.last_view, self.cursor));
+        let Some(a) = anchor else { return };
+        let Some(file) = self.current_path().map(str::to_string) else {
+            return;
+        };
+        let Some(idx) = self.review.index_at(&file, a.side, a.line) else {
+            self.status = Some("No comment on this line".into());
+            return;
+        };
+        let c = &self.review.comments[idx];
+        self.popup = Some(Popup {
+            file,
+            side: c.side,
+            start_line: c.start_line,
+            end_line: c.end_line,
+            anchor_text: c.anchor_text.clone(),
+            buffer: c.body.clone(),
+            editing: Some(idx),
+        });
+        self.mode = Mode::CommentPopup;
+    }
+
+    fn delete_comment_under_cursor(&mut self) {
+        let anchor = self
+            .current()
+            .and_then(|rf| diff_view::anchor_at(rf, self.last_view, self.cursor));
+        let Some(a) = anchor else { return };
+        let Some(file) = self.current_path().map(str::to_string) else {
+            return;
+        };
+        if let Some(idx) = self.review.index_at(&file, a.side, a.line) {
+            self.review.remove(idx);
+            self.status = Some("Comment deleted".into());
+        }
+    }
+
+    fn save_comment(&mut self) {
+        let Some(popup) = self.popup.take() else { return };
+        self.mode = Mode::Normal;
+        if popup.buffer.trim().is_empty() {
+            self.status = Some("Empty comment discarded".into());
+            return;
+        }
+        match popup.editing {
+            Some(idx) => self.review.set_body(idx, popup.buffer),
+            None => self.review.add(Comment {
+                file: popup.file,
+                side: popup.side,
+                start_line: popup.start_line,
+                end_line: popup.end_line,
+                anchor_text: popup.anchor_text,
+                body: popup.buffer,
+            }),
+        }
+    }
+
     // --- rendering --------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
@@ -289,6 +479,11 @@ impl App {
         self.last_view = view;
         self.last_diff_height = diff_area.height.saturating_sub(2) as usize;
 
+        let marks = self
+            .current_path()
+            .map(|p| self.review.marks_for(p))
+            .unwrap_or_default();
+
         if self.files.is_empty() {
             self.draw_empty(f, diff_area);
         } else if let Some(rf) = &self.cache[self.selected] {
@@ -296,6 +491,7 @@ impl App {
                 f,
                 diff_area,
                 rf,
+                &marks,
                 view,
                 self.cursor,
                 self.v_scroll,
@@ -305,8 +501,11 @@ impl App {
         }
 
         f.render_widget(self.help_bar(), help_area);
-        if matches!(self.mode, Mode::Help) {
-            self.draw_help_overlay(f, area);
+
+        match self.mode {
+            Mode::Help => self.draw_help_overlay(f, area),
+            Mode::CommentPopup => self.draw_popup(f, area),
+            _ => {}
         }
     }
 
@@ -316,10 +515,7 @@ impl App {
             .title(format!(" Review — {} ", self.range.label));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let msg = format!(
-            "No changes in {}.\n\nPress q to quit.",
-            self.range.label
-        );
+        let msg = format!("No changes in {}.\n\nPress q to quit.", self.range.label);
         f.render_widget(
             Paragraph::new(msg)
                 .style(Style::default().fg(Color::DarkGray))
@@ -329,9 +525,13 @@ impl App {
     }
 
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Files ({}) ", self.files.len()));
+        let total = self.review.total();
+        let title = if total > 0 {
+            format!(" Files ({}) · {} 💬 ", self.files.len(), total)
+        } else {
+            format!(" Files ({}) ", self.files.len())
+        };
+        let block = Block::default().borders(Borders::ALL).title(title);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -357,10 +557,18 @@ impl App {
                 } else {
                     Style::default()
                 };
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{icon} "), Style::default().fg(color)),
                     Span::styled(name.to_string(), name_style),
-                ])
+                ];
+                let count = self.review.count_for_file(&file.path);
+                if count > 0 {
+                    spans.push(Span::styled(
+                        format!(" ({count})"),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+                Line::from(spans)
             })
             .collect();
 
@@ -368,16 +576,76 @@ impl App {
     }
 
     fn help_bar(&self) -> Paragraph<'static> {
-        render_help_bar(&[
-            ("j/k", "move"),
-            ("C-d/u", "page"),
-            ("]c/[c", "hunk"),
-            ("Tab", "file"),
-            ("v", "view"),
-            ("b", "sidebar"),
-            ("?", "help"),
-            ("q", "quit"),
-        ])
+        if let Some(status) = &self.status {
+            return Paragraph::new(Line::from(Span::styled(
+                status.clone(),
+                Style::default().fg(Color::Yellow),
+            )))
+            .block(Block::default().borders(Borders::ALL).title(" Status "));
+        }
+        let hints: &[(&str, &str)] = match self.mode {
+            Mode::Normal => &[
+                ("j/k", "move"),
+                ("c", "comment"),
+                ("V", "multi"),
+                ("⏎", "edit"),
+                ("D", "del"),
+                ("]c", "hunk"),
+                ("Tab", "file"),
+                ("v", "view"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            Mode::VisualSelect => &[("j/k", "extend"), ("c", "comment"), ("esc", "cancel")],
+            Mode::CommentPopup => &[
+                ("type", "comment"),
+                ("C-s", "save"),
+                ("⏎", "newline"),
+                ("esc", "cancel"),
+            ],
+            Mode::Help => &[("esc", "close")],
+        };
+        render_help_bar(hints)
+    }
+
+    fn draw_popup(&self, f: &mut Frame, area: Rect) {
+        let Some(p) = &self.popup else { return };
+        let name = p.file.rsplit('/').next().unwrap_or(&p.file);
+        let lines = if p.end_line > p.start_line {
+            format!("{}-{}", p.start_line, p.end_line)
+        } else {
+            p.start_line.to_string()
+        };
+        let verb = if p.editing.is_some() { "Edit" } else { "Comment" };
+        let title = format!(" {verb} {name}:{lines} ");
+
+        let popup_area = centered_rect(60, 50, area);
+        f.render_widget(Clear, popup_area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title);
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        let body_help = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner);
+
+        let mut text = p.buffer.clone();
+        text.push('▏'); // simple insertion caret
+        f.render_widget(
+            Paragraph::new(text).wrap(Wrap { trim: false }),
+            body_help[0],
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Ctrl-s save · ⏎ newline · esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            body_help[1],
+        );
     }
 
     fn draw_help_overlay(&self, f: &mut Frame, area: Rect) {
@@ -393,12 +661,16 @@ impl App {
             Line::raw("]c / [c        next / prev hunk  (also } / {)"),
             Line::raw("Tab / S-Tab    next / prev file"),
             Line::raw("h / l  ← →     scroll horizontally"),
+            Line::raw("c              comment on the current line"),
+            Line::raw("V              start a multi-line selection, then c"),
+            Line::raw("⏎              edit the comment under the cursor"),
+            Line::raw("D              delete the comment under the cursor"),
             Line::raw("v              toggle split / unified"),
             Line::raw("b              toggle sidebar"),
             Line::raw("? / esc        close this help"),
             Line::raw("q              quit"),
         ];
-        let popup = centered_rect(60, 70, area);
+        let popup = centered_rect(60, 80, area);
         f.render_widget(Clear, popup);
         let block = Block::default().borders(Borders::ALL).title(" Help ");
         f.render_widget(Paragraph::new(lines).block(block), popup);

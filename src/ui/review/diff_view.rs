@@ -13,6 +13,7 @@
 use crate::git::GitError;
 use crate::git::review::diff::{ChangedFile, FileDiff, Row, RowKind};
 use crate::git::review::range::Endpoint;
+use crate::git::review::state::{Marks, Side};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -154,6 +155,99 @@ pub fn hunk_header_indices(rf: &RenderedFile, view: ViewMode) -> Vec<usize> {
     }
 }
 
+// --- Anchoring (cursor -> comment target) -----------------------------------
+
+/// Where a comment would attach for a given cursor position.
+pub struct Anchor {
+    pub side: Side,
+    pub line: usize,
+    pub text: String,
+}
+
+/// Resolve the cursor's visual line to a comment anchor, preferring the new
+/// side (the post-change line an agent acts on). Returns `None` for
+/// non-anchorable rows (hunk headers, side-by-side gap rows).
+pub fn anchor_at(rf: &RenderedFile, view: ViewMode, cursor: usize) -> Option<Anchor> {
+    match view {
+        ViewMode::SideBySide => match side_lines(&rf.diff).get(cursor)? {
+            SideLine::Header(_) => None,
+            SideLine::Pair { left, right } => pair_anchor(*left, *right),
+        },
+        ViewMode::Unified => match uni_lines(&rf.diff).get(cursor)? {
+            UniLine::Header(_) => None,
+            UniLine::Row(row) => row_anchor(row),
+        },
+    }
+}
+
+fn pair_anchor(left: Option<&Row>, right: Option<&Row>) -> Option<Anchor> {
+    if let Some(r) = right
+        && let Some(line) = r.new_no
+    {
+        return Some(Anchor {
+            side: Side::New,
+            line,
+            text: r.text.clone(),
+        });
+    }
+    if let Some(l) = left
+        && let Some(line) = l.old_no
+    {
+        return Some(Anchor {
+            side: Side::Old,
+            line,
+            text: l.text.clone(),
+        });
+    }
+    None
+}
+
+fn row_anchor(row: &Row) -> Option<Anchor> {
+    if let Some(line) = row.new_no {
+        Some(Anchor {
+            side: Side::New,
+            line,
+            text: row.text.clone(),
+        })
+    } else {
+        row.old_no.map(|line| Anchor {
+            side: Side::Old,
+            line,
+            text: row.text.clone(),
+        })
+    }
+}
+
+/// Resolve a visual-line range `[lo, hi]` to a single multi-line anchor: the
+/// side of the first anchorable row, spanning min..max line on that side.
+pub fn anchor_span(
+    rf: &RenderedFile,
+    view: ViewMode,
+    lo: usize,
+    hi: usize,
+) -> Option<(Side, usize, usize, String)> {
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let mut side: Option<Side> = None;
+    let mut min = usize::MAX;
+    let mut max = 0usize;
+    let mut text = String::new();
+
+    for i in lo..=hi {
+        if let Some(a) = anchor_at(rf, view, i) {
+            let s = *side.get_or_insert(a.side);
+            if a.side == s {
+                if a.line < min {
+                    min = a.line;
+                    text = a.text.clone();
+                }
+                max = max.max(a.line);
+            }
+        }
+    }
+
+    side.map(|s| (s, min, max, text))
+}
+
 // --- Rendering --------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -161,6 +255,7 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     rf: &RenderedFile,
+    marks: &Marks,
     view: ViewMode,
     cursor: usize,
     v_scroll: usize,
@@ -198,7 +293,15 @@ pub fn render(
             let model = side_lines(&rf.diff);
             visible_range(model.len(), v_scroll, height)
                 .map(|i| {
-                    side_line_to_line(&model[i], rf, gw, width, h_scroll, focused && i == cursor)
+                    side_line_to_line(
+                        &model[i],
+                        rf,
+                        marks,
+                        gw,
+                        width,
+                        h_scroll,
+                        focused && i == cursor,
+                    )
                 })
                 .collect()
         }
@@ -206,7 +309,15 @@ pub fn render(
             let model = uni_lines(&rf.diff);
             visible_range(model.len(), v_scroll, height)
                 .map(|i| {
-                    uni_line_to_line(&model[i], rf, gw, width, h_scroll, focused && i == cursor)
+                    uni_line_to_line(
+                        &model[i],
+                        rf,
+                        marks,
+                        gw,
+                        width,
+                        h_scroll,
+                        focused && i == cursor,
+                    )
                 })
                 .collect()
         }
@@ -243,24 +354,30 @@ fn gutter_width(diff: &FileDiff) -> usize {
 fn side_line_to_line<'a>(
     line: &SideLine<'a>,
     rf: &'a RenderedFile,
+    marks: &Marks,
     gw: usize,
     width: usize,
     h_scroll: usize,
     cursor: bool,
 ) -> Line<'a> {
+    // First column is a 1-cell comment marker; the rest is the body.
+    let body_width = width.saturating_sub(1);
     match line {
-        SideLine::Header(h) => header_line(h, width, cursor),
+        SideLine::Header(h) => {
+            let mut spans = vec![marker_span(false, cursor)];
+            spans.extend(header_spans(h, body_width, cursor));
+            Line::from(spans)
+        }
         SideLine::Pair { left, right } => {
-            // Two halves separated by " │ "; each half = gutter + space + text.
             let sep_cols = 3usize;
-            let half = width.saturating_sub(sep_cols) / 2;
+            let half = body_width.saturating_sub(sep_cols) / 2;
             let text_w = half.saturating_sub(gw + 1);
 
-            let mut spans = Vec::new();
+            let mut spans = vec![marker_span(pair_marked(*left, *right, marks), cursor)];
             spans.extend(cell(
                 *left,
                 segs(&rf.old_hl, left.and_then(|r| r.old_no)),
-                Side::Old,
+                Col::Old,
                 gw,
                 text_w,
                 h_scroll,
@@ -273,7 +390,7 @@ fn side_line_to_line<'a>(
             spans.extend(cell(
                 *right,
                 segs(&rf.new_hl, right.and_then(|r| r.new_no)),
-                Side::New,
+                Col::New,
                 gw,
                 text_w,
                 h_scroll,
@@ -287,31 +404,38 @@ fn side_line_to_line<'a>(
 fn uni_line_to_line<'a>(
     line: &UniLine<'a>,
     rf: &'a RenderedFile,
+    marks: &Marks,
     gw: usize,
     width: usize,
     h_scroll: usize,
     cursor: bool,
 ) -> Line<'a> {
+    let body_width = width.saturating_sub(1);
     match line {
-        UniLine::Header(h) => header_line(h, width, cursor),
+        UniLine::Header(h) => {
+            let mut spans = vec![marker_span(false, cursor)];
+            spans.extend(header_spans(h, body_width, cursor));
+            Line::from(spans)
+        }
         UniLine::Row(row) => {
-            let marker = match row.kind {
+            let sign = match row.kind {
                 RowKind::Added => "+",
                 RowKind::Removed => "-",
                 RowKind::Context => " ",
             };
             let bg = row_bg(row.kind, cursor);
-            let text_w = width.saturating_sub(gw * 2 + 4);
+            let text_w = body_width.saturating_sub(gw * 2 + 4);
             let segments = match row.kind {
                 RowKind::Removed => segs(&rf.old_hl, row.old_no),
                 _ => segs(&rf.new_hl, row.new_no),
             };
 
             let mut spans = vec![
+                marker_span(uni_marked(row, marks), cursor),
                 num_span(row.old_no, gw, bg),
                 Span::styled(" ", Style::default().bg(bg)),
                 num_span(row.new_no, gw, bg),
-                Span::styled(format!(" {marker} "), marker_style(row.kind, cursor)),
+                Span::styled(format!(" {sign} "), marker_style(row.kind, cursor)),
             ];
             spans.extend(text_spans(
                 &row.text,
@@ -327,7 +451,7 @@ fn uni_line_to_line<'a>(
     }
 }
 
-enum Side {
+enum Col {
     Old,
     New,
 }
@@ -337,7 +461,7 @@ enum Side {
 fn cell<'a>(
     row: Option<&'a Row>,
     segments: &'a [Segment],
-    side: Side,
+    col: Col,
     gw: usize,
     text_w: usize,
     h_scroll: usize,
@@ -351,9 +475,9 @@ fn cell<'a>(
             Span::styled(" ".repeat(text_w), Style::default().bg(bg)),
         ];
     };
-    let num = match side {
-        Side::Old => row.old_no,
-        Side::New => row.new_no,
+    let num = match col {
+        Col::Old => row.old_no,
+        Col::New => row.new_no,
     };
     let bg = row_bg(row.kind, cursor);
     let mut spans = vec![
@@ -372,17 +496,45 @@ fn cell<'a>(
     spans
 }
 
-fn header_line<'a>(header: &'a str, width: usize, cursor: bool) -> Line<'a> {
+fn header_spans<'a>(header: &str, width: usize, cursor: bool) -> Vec<Span<'a>> {
     let bg = if cursor { CURSOR_BG } else { Color::Reset };
     let mut text = header.to_string();
-    let w = width;
-    if text.chars().count() < w {
-        text.push_str(&" ".repeat(w - text.chars().count()));
+    let count = text.chars().count();
+    if count < width {
+        text.push_str(&" ".repeat(width - count));
     }
-    Line::from(Span::styled(
+    vec![Span::styled(
         text,
-        Style::default().fg(HEADER_FG).bg(bg).add_modifier(Modifier::BOLD),
-    ))
+        Style::default()
+            .fg(HEADER_FG)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    )]
+}
+
+fn marker_span<'a>(marked: bool, cursor: bool) -> Span<'a> {
+    let bg = if cursor { CURSOR_BG } else { Color::Reset };
+    let (ch, fg) = if marked {
+        ("●", Color::Magenta)
+    } else {
+        (" ", Color::Reset)
+    };
+    Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
+}
+
+fn pair_marked(left: Option<&Row>, right: Option<&Row>, marks: &Marks) -> bool {
+    let l = left
+        .and_then(|r| r.old_no)
+        .is_some_and(|n| marks.old.contains(&n));
+    let r = right
+        .and_then(|r| r.new_no)
+        .is_some_and(|n| marks.new.contains(&n));
+    l || r
+}
+
+fn uni_marked(row: &Row, marks: &Marks) -> bool {
+    row.new_no.is_some_and(|n| marks.new.contains(&n))
+        || row.old_no.is_some_and(|n| marks.old.contains(&n))
 }
 
 fn num_span<'a>(num: Option<usize>, gw: usize, bg: Color) -> Span<'a> {
@@ -631,7 +783,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
         terminal
-            .draw(|f| render(f, f.area(), &rf, ViewMode::Unified, 0, 0, 0, true))
+            .draw(|f| render(f, f.area(), &rf, &Marks::default(), ViewMode::Unified, 0, 0, 0, true))
             .unwrap();
         let rendered = format!("{}", terminal.backend());
 
@@ -656,7 +808,19 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(120, 8)).unwrap();
         terminal
-            .draw(|f| render(f, f.area(), &rf, ViewMode::SideBySide, 0, 0, 0, true))
+            .draw(|f| {
+                render(
+                    f,
+                    f.area(),
+                    &rf,
+                    &Marks::default(),
+                    ViewMode::SideBySide,
+                    0,
+                    0,
+                    0,
+                    true,
+                )
+            })
             .unwrap();
         let rendered = format!("{}", terminal.backend());
         assert!(rendered.contains("old line"));
