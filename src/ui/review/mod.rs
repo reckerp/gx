@@ -6,6 +6,7 @@
 pub mod diff_view;
 pub mod highlight;
 
+use crate::git::review::blob;
 use crate::git::review::diff::ChangedFile;
 use crate::git::review::range::ReviewRange;
 use crate::git::review::state::{Comment, Marks, ReviewState, Side};
@@ -52,9 +53,14 @@ struct Popup {
 /// Launch the review TUI for an already-resolved range and changed-file list.
 pub fn run(range: ReviewRange, files: Vec<ChangedFile>, theme: &str, min_width: u16) -> Result<()> {
     // `with_terminal` enters the alternate screen / raw mode and restores it
-    // (even on panic, via its guard) before returning; the inner Result is the
-    // review loop's own outcome.
-    with_terminal(|terminal| run_loop(terminal, range, files, theme, min_width)).into_diagnostic()?
+    // (even on panic, via its guard) before returning; the inner Result carries
+    // the loop's outcome plus an optional message to print after teardown.
+    let message = with_terminal(|terminal| run_loop(terminal, range, files, theme, min_width))
+        .into_diagnostic()??;
+    if let Some(msg) = message {
+        println!("{msg}");
+    }
+    Ok(())
 }
 
 fn run_loop(
@@ -63,7 +69,7 @@ fn run_loop(
     files: Vec<ChangedFile>,
     theme: &str,
     min_width: u16,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let mut app = App::new(range, files, theme, min_width);
 
     loop {
@@ -77,7 +83,7 @@ fn run_loop(
             break;
         }
     }
-    Ok(())
+    Ok(app.finish_message.take())
 }
 
 struct App {
@@ -98,6 +104,7 @@ struct App {
     popup: Option<Popup>,
     select_anchor: Option<usize>,
     status: Option<String>,
+    finish_message: Option<String>,
     pending_bracket: Option<char>,
     last_diff_height: usize,
     last_view: ViewMode,
@@ -124,6 +131,7 @@ impl App {
             popup: None,
             select_anchor: None,
             status: None,
+            finish_message: None,
             pending_bracket: None,
             last_diff_height: 1,
             last_view: ViewMode::SideBySide,
@@ -248,6 +256,7 @@ impl App {
             }
             (KeyCode::Enter, _) => self.edit_comment_under_cursor(),
             (KeyCode::Char('D'), _) => self.delete_comment_under_cursor(),
+            (KeyCode::Char('F'), _) => return self.finish(),
 
             (KeyCode::Char('v'), _) => self.toggle_view(),
             (KeyCode::Char('b'), _) => self.show_sidebar = !self.show_sidebar,
@@ -453,6 +462,48 @@ impl App {
         }
     }
 
+    /// Build the wrapped review blob, copy it to the clipboard, and signal quit.
+    /// Returns false (does not quit) when there is nothing to finish.
+    fn finish(&mut self) -> bool {
+        let total = self.review.total();
+        if total == 0 {
+            self.status = Some("No comments yet — nothing to finish".into());
+            return false;
+        }
+
+        // Gather blocks in (file, line) order; the inner scope drops the
+        // borrows of `review`/`files`/`cache` before we mutate `finish_message`.
+        let blocks = {
+            let mut comments: Vec<&Comment> = self.review.comments.iter().collect();
+            comments.sort_by(|a, b| a.file.cmp(&b.file).then(a.start_line.cmp(&b.start_line)));
+            comments
+                .iter()
+                .map(|c| {
+                    let snippet = self
+                        .files
+                        .iter()
+                        .position(|f| f.path == c.file)
+                        .and_then(|i| self.cache[i].as_ref())
+                        .map(|rf| blob::context_lines(&rf.diff, c.side, c.start_line, c.end_line))
+                        .unwrap_or_default();
+                    blob::CommentBlock {
+                        file: c.file.clone(),
+                        location: blob::location(c.side, c.start_line, c.end_line),
+                        snippet,
+                        body: c.body.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let text = blob::build(&self.range.label, &blocks);
+        self.finish_message = Some(match crate::clipboard::copy(&text) {
+            Ok(()) => format!("✓ Copied review ({total} comment(s)) to the clipboard."),
+            Err(_) => format!("Clipboard tool unavailable — here is the review blob:\n\n{text}"),
+        });
+        true
+    }
+
     // --- rendering --------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
@@ -593,6 +644,7 @@ impl App {
                 ("]c", "hunk"),
                 ("Tab", "file"),
                 ("v", "view"),
+                ("F", "finish"),
                 ("?", "help"),
                 ("q", "quit"),
             ],
@@ -665,6 +717,7 @@ impl App {
             Line::raw("V              start a multi-line selection, then c"),
             Line::raw("⏎              edit the comment under the cursor"),
             Line::raw("D              delete the comment under the cursor"),
+            Line::raw("F              finish: copy the review to the clipboard"),
             Line::raw("v              toggle split / unified"),
             Line::raw("b              toggle sidebar"),
             Line::raw("? / esc        close this help"),
