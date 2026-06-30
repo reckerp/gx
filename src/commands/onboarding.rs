@@ -1,4 +1,6 @@
-use crate::git::{self, GitError, worktree::Worktree};
+use crate::commands::workspace::main_worktree_root;
+use crate::git::{self, GitError};
+use crate::output;
 use crate::repo_config::{self, RepoConfigFile, RepoWorkspaceSection};
 use crate::repo_setup;
 use crate::ui;
@@ -22,15 +24,13 @@ pub fn run() -> Result<()> {
     let mut profile = repo_setup::profile_for_repo(&main_root)?;
     let candidates = repo_setup::discover_copy_candidates(&main_root)?;
 
-    let mut terminal =
-        ui::terminal::setup_terminal().map_err(|e| OnboardingError::TuiError(e.to_string()))?;
-    let selected =
-        ui::setup_file_picker::run(&mut terminal, &candidates, &profile.config.copy_files);
-    ui::terminal::restore_terminal(terminal)
-        .map_err(|e| OnboardingError::TuiError(e.to_string()))?;
+    let selected = ui::terminal::with_terminal(|t| {
+        ui::setup_file_picker::run(t, &candidates, &profile.config.copy_files)
+    })
+    .map_err(|e| OnboardingError::TuiError(e.to_string()))?;
 
     let Some(copy_files) = selected? else {
-        eprintln!("Cancelled");
+        output::cancelled();
         return Ok(());
     };
 
@@ -41,12 +41,17 @@ pub fn run() -> Result<()> {
     // Shared+local choices.
     eprintln!();
     eprintln!("Where should this setup be saved?");
-    eprintln!("  - Shared repo config is committable (.gx/workspace.toml) and gives the team a default.");
-    eprintln!("  - Personal config stays on this machine (good for secrets and local-only scripts).");
+    eprintln!(
+        "  - Shared repo config is committable (.gx/workspace.toml) and gives the team a default."
+    );
+    eprintln!(
+        "  - Personal config stays on this machine (good for secrets and local-only scripts)."
+    );
     let shared = ui::confirm::run("Save as shared repo config (.gx/workspace.toml)?")?;
 
     if shared {
-        let with_local = ui::confirm::run("Also create a local override (.gx/workspace.local.toml)?")?;
+        let with_local =
+            ui::confirm::run("Also create a local override (.gx/workspace.local.toml)?")?;
         save_shared(&main_root, profile.config.copy_files.clone(), with_local)
     } else {
         save_personal(profile)
@@ -133,12 +138,4 @@ fn save_shared(
     }
 
     Ok(())
-}
-
-fn main_worktree_root(worktrees: &[Worktree]) -> Result<std::path::PathBuf, OnboardingError> {
-    worktrees
-        .iter()
-        .find(|w| w.is_main)
-        .map(|w| w.path.clone())
-        .ok_or(OnboardingError::GitError(GitError::NotInRepo))
 }

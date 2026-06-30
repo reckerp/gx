@@ -1,11 +1,12 @@
-use super::{TermStderr, adjust_scroll, render_help_bar};
+use super::{
+    TermStderr, adjust_scroll, fuzzy_filter, render_help_bar, render_search_bar, visible_range,
+};
 use crate::git::pull_request::{PullRequestLookup, PullRequestState, PullRequestStatus};
 use crate::git::worktree::{
     SummaryLookup, Worktree, WorktreeSummary, apply_local_summaries, apply_pull_requests,
     pending_summaries,
 };
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use fuzzy_matcher::skim::SkimMatcherV2;
 use miette::IntoDiagnostic;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -43,29 +44,6 @@ enum Mode {
         delete_branches: bool,
     },
     Help,
-}
-
-fn filter_worktrees(worktrees: &[Worktree], query: &str) -> Vec<Worktree> {
-    if query.is_empty() {
-        return worktrees.to_vec();
-    }
-
-    let matcher = SkimMatcherV2::default();
-    let mut matches: Vec<_> = worktrees
-        .iter()
-        .filter_map(|w| w.match_score(&matcher, query).map(|score| (score, w)))
-        .collect();
-
-    matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-    matches.into_iter().map(|(_, w)| w.clone()).collect()
-}
-
-fn render_search_bar(query: &str) -> Paragraph<'_> {
-    Paragraph::new(query).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Fuzzy Search "),
-    )
 }
 
 fn render_workspace_list<'a>(
@@ -448,16 +426,6 @@ fn toggle_visible_selection(worktrees: &[Worktree], selected_paths: &mut HashSet
     }
 }
 
-fn visible_range(total: usize, scroll_offset: usize, visible_height: usize) -> String {
-    if total == 0 || visible_height == 0 {
-        return "0 shown".to_string();
-    }
-
-    let start = scroll_offset.min(total - 1) + 1;
-    let end = (scroll_offset + visible_height).min(total);
-    format!("{}-{} of {}", start, end, total)
-}
-
 fn render_help_modal(area: Rect) -> Paragraph<'static> {
     let content = vec![
         Line::from(vec![
@@ -583,7 +551,7 @@ pub fn run(
             apply_pull_requests(&mut summaries, worktrees, lookup);
         }
 
-        let filtered = filter_worktrees(worktrees, &query);
+        let filtered = fuzzy_filter(worktrees, &query, |m, w| w.match_score(m, &query));
 
         if selected_index >= filtered.len() && !filtered.is_empty() {
             selected_index = filtered.len() - 1;
@@ -1060,13 +1028,6 @@ mod tests {
         summaries.insert(pending.path.clone(), WorktreeSummary::default());
 
         assert!(pr_urls_for_targets(&[pending], &summaries).is_empty());
-    }
-
-    #[test]
-    fn test_visible_range() {
-        assert_eq!(visible_range(0, 0, 5), "0 shown");
-        assert_eq!(visible_range(12, 0, 5), "1-5 of 12");
-        assert_eq!(visible_range(12, 10, 5), "11-12 of 12");
     }
 
     #[test]

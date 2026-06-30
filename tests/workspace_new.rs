@@ -95,9 +95,7 @@ impl Fixture {
 
     fn workspace_path(&self, dir_name: &str) -> PathBuf {
         // workspaces_root is relative to the main worktree root (the repo).
-        self.repo
-            .join(&self.workspaces_root)
-            .join(dir_name)
+        self.repo.join(&self.workspaces_root).join(dir_name)
     }
 }
 
@@ -133,10 +131,7 @@ fn default_prints_navigation_target_to_stdout() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
 
     let printed = stdout(&out);
-    let expected = fx
-        .workspace_path("feat-y")
-        .canonicalize()
-        .unwrap();
+    let expected = fx.workspace_path("feat-y").canonicalize().unwrap();
     assert_eq!(printed.trim(), expected.to_string_lossy());
 }
 
@@ -144,7 +139,12 @@ fn default_prints_navigation_target_to_stdout() {
 fn no_fetch_does_not_fetch() {
     let fx = Fixture::new();
     // An origin remote exists, so without --no-fetch gx would try to fetch it.
-    fx.git(&["remote", "add", "origin", "https://invalid.invalid/repo.git"]);
+    fx.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://invalid.invalid/repo.git",
+    ]);
 
     let out = fx.gx(&["workspace", "new", "feat-offline", "--no-fetch", "main"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -227,11 +227,7 @@ fn from_staged_handles_renamed_files() {
     std::fs::write(fx.repo.join("old_name.txt"), "rename me\n").unwrap();
     fx.git(&["add", "old_name.txt"]);
     fx.git(&["commit", "-m", "add old_name"]);
-    std::fs::rename(
-        fx.repo.join("old_name.txt"),
-        fx.repo.join("new_name.txt"),
-    )
-    .unwrap();
+    std::fs::rename(fx.repo.join("old_name.txt"), fx.repo.join("new_name.txt")).unwrap();
     fx.git(&["add", "-A"]);
 
     let out = fx.gx(&["workspace", "new", "renamed", "--no-cd", "--from-staged"]);
@@ -322,9 +318,7 @@ fn existing_clean_workspace_can_switch_branch() {
     fx.git(&["branch", "other"]);
 
     // Re-running new for the same path but branch 'other' switches it.
-    let out = fx.gx(&[
-        "workspace", "new", "topic", "--no-cd", "-b", "other",
-    ]);
+    let out = fx.gx(&["workspace", "new", "topic", "--no-cd", "-b", "other"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert!(
         stderr(&out).contains("Switched workspace"),
@@ -352,9 +346,7 @@ fn existing_dirty_workspace_refuses_branch_switch() {
     std::fs::write(ws.join("README.md"), "dirty\n").unwrap();
     fx.git(&["branch", "other2"]);
 
-    let out = fx.gx(&[
-        "workspace", "new", "topic2", "--no-cd", "-b", "other2",
-    ]);
+    let out = fx.gx(&["workspace", "new", "topic2", "--no-cd", "-b", "other2"]);
     assert!(!out.status.success());
     assert!(
         stderr(&out).contains("uncommitted changes"),
@@ -420,7 +412,13 @@ fn detach_creates_detached_head() {
 fn detach_conflicts_with_branch_flag() {
     let fx = Fixture::new();
     let out = fx.gx(&[
-        "workspace", "new", "bad", "--no-cd", "--detach", "-b", "whatever",
+        "workspace",
+        "new",
+        "bad",
+        "--no-cd",
+        "--detach",
+        "-b",
+        "whatever",
     ]);
     assert!(!out.status.success());
 }

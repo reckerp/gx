@@ -31,10 +31,7 @@ pub fn stage_paths(paths: &[String]) -> Result<Vec<String>, GitError> {
                 // tracked directory deleted from the working tree
                 index.remove_all([path], None)?;
             } else {
-                return Err(GitError::CommandFailed(format!(
-                    "pathspec '{}' did not match any files",
-                    path
-                )));
+                return Err(GitError::PathspecNotFound(path.clone()));
             }
         }
         staged.push(path.clone());

@@ -27,12 +27,8 @@ pub fn run(limit: Option<usize>) -> Result<()> {
         return Ok(());
     }
 
-    let mut terminal =
-        ui::terminal::setup_terminal().map_err(|e| LogError::TuiError(e.to_string()))?;
-
-    let result = ui::log_viewer::run(&mut terminal, &log);
-
-    ui::terminal::restore_terminal(terminal).map_err(|e| LogError::TuiError(e.to_string()))?;
+    let result = ui::terminal::with_terminal(|t| ui::log_viewer::run(t, &log))
+        .map_err(|e| LogError::TuiError(e.to_string()))?;
 
     match result? {
         LogAction::Checkout(oid) => {

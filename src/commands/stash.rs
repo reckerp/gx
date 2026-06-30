@@ -1,5 +1,6 @@
 use crate::git;
 use crate::git::GitError;
+use crate::output;
 use crate::ui;
 use crate::ui::stash_picker::StashAction;
 use miette::{Diagnostic, Result};
@@ -96,7 +97,7 @@ pub fn run_drop(stash_ref: Option<String>) -> Result<()> {
 
     let confirmed = ui::confirm::run(&format!("Drop stash@{{{}}}?", index))?;
     if !confirmed {
-        println!("Cancelled");
+        output::cancelled();
         return Ok(());
     }
 
@@ -115,7 +116,7 @@ pub fn run_clear() -> Result<()> {
 
     let confirmed = ui::confirm::run(&format!("Clear all {} stashes?", stashes.len()))?;
     if !confirmed {
-        println!("Cancelled");
+        output::cancelled();
         return Ok(());
     }
 
@@ -152,13 +153,11 @@ pub fn run_interactive() -> Result<()> {
         return Ok(());
     }
 
-    let mut terminal =
-        ui::terminal::setup_terminal().map_err(|e| StashError::TuiError(e.to_string()))?;
-    let result = ui::stash_picker::run(&mut terminal, &stashes);
-    ui::terminal::restore_terminal(terminal).map_err(|e| StashError::TuiError(e.to_string()))?;
+    let result = ui::terminal::with_terminal(|t| ui::stash_picker::run(t, &stashes))
+        .map_err(|e| StashError::TuiError(e.to_string()))?;
 
     let Some(selection) = result? else {
-        println!("Cancelled");
+        output::cancelled();
         return Ok(());
     };
 
@@ -178,7 +177,7 @@ pub fn run_interactive() -> Result<()> {
                 git::stash::drop(selection.entry.index).map_err(StashError::GitError)?;
                 println!("Dropped stash@{{{}}}", selection.entry.index);
             } else {
-                println!("Cancelled");
+                output::cancelled();
             }
         }
         StashAction::Show => {
@@ -199,7 +198,7 @@ pub fn run_interactive() -> Result<()> {
             let branch_name = branch_name.trim();
 
             if branch_name.is_empty() {
-                println!("Cancelled");
+                output::cancelled();
                 return Ok(());
             }
 

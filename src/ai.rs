@@ -159,7 +159,8 @@ mod tests {
 
     #[test]
     fn test_agent_command_opencode_uses_prompt() {
-        let (command, args) = agent_command(&Agent::OpenCode, "opencode/big-pickle", "do the thing");
+        let (command, args) =
+            agent_command(&Agent::OpenCode, "opencode/big-pickle", "do the thing");
         assert_eq!(command, "opencode");
         assert_eq!(
             args,

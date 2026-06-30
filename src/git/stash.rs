@@ -96,7 +96,7 @@ pub fn show(index: usize) -> Result<String, GitError> {
         true
     })?;
 
-    let oid = stash_oid.ok_or_else(|| GitError::CommandFailed("Stash not found".to_string()))?;
+    let oid = stash_oid.ok_or(GitError::StashNotFound(index))?;
     let stash_commit = repo.find_commit(oid)?;
     let stash_tree = stash_commit.tree()?;
 
@@ -135,7 +135,7 @@ pub fn branch(name: &str, index: usize) -> Result<(), GitError> {
         true
     })?;
 
-    let oid = stash_oid.ok_or_else(|| GitError::CommandFailed("Stash not found".to_string()))?;
+    let oid = stash_oid.ok_or(GitError::StashNotFound(index))?;
 
     let parent_oid = {
         let stash_commit = repo.find_commit(oid)?;

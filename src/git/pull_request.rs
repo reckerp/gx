@@ -1,6 +1,6 @@
+use super::gh;
 use super::worktree::Worktree;
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -86,28 +86,23 @@ pub fn list_for_worktrees(
         return Ok(HashMap::new());
     }
 
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--limit",
-            "500",
-            "--json",
-            "headRefName,isDraft,number,state,url",
-            "--template",
-            "{{range .}}{{.headRefName}}{{\"\\t\"}}{{.number}}{{\"\\t\"}}{{.state}}{{\"\\t\"}}{{.isDraft}}{{\"\\t\"}}{{.url}}{{\"\\n\"}}{{end}}",
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .map_err(|_| PullRequestLookupError::Io)?;
+    let stdout = gh::capture(&[
+        "pr",
+        "list",
+        "--state",
+        "all",
+        "--limit",
+        "500",
+        "--json",
+        "headRefName,isDraft,number,state,url",
+        "--template",
+        "{{range .}}{{.headRefName}}{{\"\\t\"}}{{.number}}{{\"\\t\"}}{{.state}}{{\"\\t\"}}{{.isDraft}}{{\"\\t\"}}{{.url}}{{\"\\n\"}}{{end}}",
+    ])
+    .map_err(|e| match e {
+        gh::GhError::NotFound => PullRequestLookupError::Io,
+        gh::GhError::Failed(_) => PullRequestLookupError::CommandFailed,
+    })?;
 
-    if !output.status.success() {
-        return Err(PullRequestLookupError::CommandFailed);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(parse_pr_list(&stdout)
         .into_iter()
         .filter(|candidate| branch_names.contains(candidate.head_ref_name.as_str()))

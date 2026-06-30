@@ -10,6 +10,7 @@ pub mod status;
 pub mod terminal;
 pub mod workspace_picker;
 
+use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::io::{Stderr, Stdout};
@@ -75,9 +76,78 @@ pub(crate) fn adjust_scroll(selected: usize, scroll_offset: usize, visible_heigh
     }
 }
 
+/// Truncate `s` to at most `max` characters (Unicode scalar values), appending
+/// a single-character ellipsis ("…") when it had to be shortened. Shared by
+/// every picker and status renderer so list rows truncate identically.
+pub(crate) fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// A "shown range" label for list titles, e.g. `"11-12 of 12"` (or `"0 shown"`
+/// when there is nothing to display).
+pub(crate) fn visible_range(total: usize, scroll_offset: usize, visible_height: usize) -> String {
+    if total == 0 || visible_height == 0 {
+        return "0 shown".to_string();
+    }
+
+    let start = scroll_offset.min(total - 1) + 1;
+    let end = (scroll_offset + visible_height).min(total);
+    format!("{}-{} of {}", start, end, total)
+}
+
+/// A bordered single-line fuzzy-search input box titled `" Fuzzy Search "`.
+pub(crate) fn render_search_bar(query: &str) -> Paragraph<'_> {
+    Paragraph::new(query).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Fuzzy Search "),
+    )
+}
+
+/// Fuzzy-filter `items` by `query`, returning the matches sorted best-first.
+/// An empty query returns every item unchanged (and skips building the matcher,
+/// since pickers re-filter on every frame). The `score` closure adapts each
+/// item to the matcher — e.g. `|m, b| m.fuzzy_match(b, query)`.
+pub(crate) fn fuzzy_filter<T: Clone>(
+    items: &[T],
+    query: &str,
+    score: impl Fn(&SkimMatcherV2, &T) -> Option<i64>,
+) -> Vec<T> {
+    if query.is_empty() {
+        return items.to_vec();
+    }
+
+    let matcher = SkimMatcherV2::default();
+    let mut matches: Vec<_> = items
+        .iter()
+        .filter_map(|item| score(&matcher, item).map(|s| (s, item)))
+        .collect();
+    matches.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    matches.into_iter().map(|(_, item)| item.clone()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn test_visible_range() {
+        assert_eq!(visible_range(0, 0, 5), "0 shown");
+        assert_eq!(visible_range(12, 0, 5), "1-5 of 12");
+        assert_eq!(visible_range(12, 10, 5), "11-12 of 12");
+    }
 
     #[test]
     fn test_adjust_scroll_keeps_selection_visible() {

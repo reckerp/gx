@@ -1,5 +1,6 @@
 use crate::git;
 use crate::git::GitError;
+use crate::output;
 use crate::ui;
 use miette::{Diagnostic, Result};
 use thiserror::Error;
@@ -45,12 +46,8 @@ fn run_interactive() -> Result<()> {
         return Ok(());
     }
 
-    let mut terminal =
-        ui::terminal::setup_terminal().map_err(|e| AddError::TuiError(e.to_string()))?;
-
-    let selection = ui::file_picker::run(&mut terminal, &staged, &unstaged);
-
-    ui::terminal::restore_terminal(terminal).map_err(|e| AddError::TuiError(e.to_string()))?;
+    let selection = ui::terminal::with_terminal(|t| ui::file_picker::run(t, &staged, &unstaged))
+        .map_err(|e| AddError::TuiError(e.to_string()))?;
 
     match selection? {
         Some(result) => {
@@ -71,7 +68,7 @@ fn run_interactive() -> Result<()> {
             }
         }
         None => {
-            println!("Cancelled.");
+            output::cancelled();
         }
     }
 

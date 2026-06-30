@@ -7,10 +7,10 @@
 //! [`is_bot`], [`suggest`], [`urlencode`]) are unit-tested without touching the
 //! network; the `gh`-driven gatherers wrap them.
 
+use super::gh;
 use super::pr_search::{self, PrError};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
 
 /// Number of distinct non-author/non-bot committers below which (with no
 /// CODEOWNERS match) the signal is considered `Thin` and the AI fallback fires.
@@ -234,12 +234,12 @@ pub fn suggest(
         .collect();
 
     let distinct_committers = history.keys().filter(|l| !excluded(l)).count();
-    let confidence = if !codeowner_owners.is_empty() || distinct_committers >= THIN_COMMITTER_THRESHOLD
-    {
-        Confidence::Strong
-    } else {
-        Confidence::Thin
-    };
+    let confidence =
+        if !codeowner_owners.is_empty() || distinct_committers >= THIN_COMMITTER_THRESHOLD {
+            Confidence::Strong
+        } else {
+            Confidence::Thin
+        };
 
     Recommendations {
         suggestions,
@@ -276,50 +276,27 @@ pub fn urlencode(s: &str) -> String {
 
 // ----- gh-driven gatherers -----------------------------------------------------
 
-#[derive(Deserialize, Default)]
-struct RawLogin {
-    #[serde(default)]
-    login: String,
-}
-
 #[derive(Deserialize)]
 struct RawFile {
     path: String,
 }
 
 #[derive(Deserialize, Default)]
-struct RawReq {
-    #[serde(default)]
-    login: Option<String>,
-    #[serde(default)]
-    slug: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
 struct RawReview {
     #[serde(default)]
-    author: RawLogin,
+    author: gh::RawLogin,
 }
 
 #[derive(Deserialize)]
 struct RawFootprint {
     #[serde(default)]
-    author: RawLogin,
+    author: gh::RawLogin,
     #[serde(default)]
     files: Vec<RawFile>,
     #[serde(rename = "reviewRequests", default)]
-    review_requests: Vec<RawReq>,
+    review_requests: Vec<gh::RawReviewRequest>,
     #[serde(default)]
     reviews: Vec<RawReview>,
-}
-
-fn req_handle(r: &RawReq) -> Option<String> {
-    r.login
-        .clone()
-        .or_else(|| r.slug.clone())
-        .or_else(|| r.name.clone())
 }
 
 fn parse_footprint(json: &str) -> Result<PrFootprint, PrError> {
@@ -337,7 +314,11 @@ fn parse_footprint(json: &str) -> Result<PrFootprint, PrError> {
     Ok(PrFootprint {
         author: raw.author.login,
         files: raw.files.into_iter().map(|f| f.path).collect(),
-        already_requested: raw.review_requests.iter().filter_map(req_handle).collect(),
+        already_requested: raw
+            .review_requests
+            .iter()
+            .filter_map(gh::RawReviewRequest::handle)
+            .collect(),
         already_reviewed,
     })
 }
@@ -358,48 +339,33 @@ pub fn gather(owner: &str, repo: &str, number: u64) -> Result<PrFootprint, PrErr
     parse_footprint(&stdout)
 }
 
-// Does not use pr_search::gh_capture: needs a custom Accept header and treats a
-// missing file as a best-effort None rather than a surfaced error.
+// Best-effort: a missing CODEOWNERS file degrades to None rather than a surfaced
+// error, so a failed `gh` call is just `.ok()`-discarded.
 fn fetch_codeowners(owner: &str, repo: &str) -> Option<String> {
     for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"] {
-        if let Ok(output) = Command::new("gh")
-            .args([
-                "api",
-                "-H",
-                "Accept: application/vnd.github.raw",
-                &format!("repos/{owner}/{repo}/contents/{path}"),
-            ])
-            .env("GH_PROMPT_DISABLED", "1")
-            .output()
-            && output.status.success()
+        let endpoint = format!("repos/{owner}/{repo}/contents/{path}");
+        if let Ok(text) =
+            gh::capture(&["api", "-H", "Accept: application/vnd.github.raw", &endpoint])
+            && !text.trim().is_empty()
         {
-            let text = String::from_utf8_lossy(&output.stdout).to_string();
-            if !text.trim().is_empty() {
-                return Some(text);
-            }
+            return Some(text);
         }
     }
     None
 }
 
-// Does not use pr_search::gh_capture: needs the `--jq` flag and degrades to an
-// empty tally on error rather than aborting the whole suggestion.
+// Best-effort: degrades to an empty tally on error rather than aborting the
+// whole suggestion.
 fn fetch_commit_authors(owner: &str, repo: &str, path: &str) -> Vec<String> {
     let endpoint = format!(
         "repos/{owner}/{repo}/commits?path={}&per_page=30",
         urlencode(path)
     );
-    let Ok(output) = Command::new("gh")
-        .args(["api", &endpoint, "--jq", ".[] | .author.login // empty"])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
+    let Ok(stdout) = gh::capture(&["api", &endpoint, "--jq", ".[] | .author.login // empty"])
     else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    stdout
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
@@ -480,7 +446,10 @@ mod tests {
 
     #[test]
     fn test_matches_codeowner() {
-        assert!(matches_codeowner("app/darkplane/**", "app/darkplane/ingest.ts"));
+        assert!(matches_codeowner(
+            "app/darkplane/**",
+            "app/darkplane/ingest.ts"
+        ));
         assert!(matches_codeowner("*.rs", "src/main.rs"));
         assert!(matches_codeowner("*", "anything/at/all.go"));
         assert!(matches_codeowner("/src/", "src/main.rs"));

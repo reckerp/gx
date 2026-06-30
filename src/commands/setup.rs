@@ -9,7 +9,14 @@ use std::io::Write;
 /// Subcommands the generated wrapper intercepts so it can `cd` into a path
 /// printed on stdout (workspace navigation, plus pr open-in-workspace actions).
 /// Kept in one place so all three shell templates stay in sync.
-const NAV_COMMANDS: &[&str] = &["workspace", "ws", "pr", "prs", "pullrequest", "pullrequests"];
+const NAV_COMMANDS: &[&str] = &[
+    "workspace",
+    "ws",
+    "pr",
+    "prs",
+    "pullrequest",
+    "pullrequests",
+];
 
 /// Generate the shell integration script (aliases + cd wrapper + completion
 /// hookup) for the resolved shell, or — when `completions` is set — only the
@@ -45,7 +52,13 @@ pub fn run(
     let config = config::load()?;
     let config_path = config::load_path()?;
 
-    let script = render_integration(&config, shell, &name, &cmd, &config_path.display().to_string());
+    let script = render_integration(
+        &config,
+        shell,
+        &name,
+        &cmd,
+        &config_path.display().to_string(),
+    );
     print!("{}", script);
 
     Ok(())
@@ -54,7 +67,7 @@ pub fn run(
 /// Emit dynamic completion candidates for the generated shell helpers. Invoked
 /// by `main` when it intercepts `gx __complete <kind>` (deliberately not a clap
 /// subcommand; see `CompleteKind`). This is the one place a completion-backing
-/// path writes data to STDOUT (analogous to `print_go_path`): the shell
+/// path writes data to STDOUT (analogous to `crate::output::nav_path`): the shell
 /// completion machinery reads it directly.
 ///
 /// Errors (e.g. not inside a repo) print nothing and exit 0 so completion never
@@ -196,7 +209,9 @@ fn zsh_wrapper(name: &str, cmd: &str) -> String {
     out.push_str("    case \"$1\" in\n");
     out.push_str(&format!("        {})\n", NAV_COMMANDS.join("|")));
     out.push_str("            local __gx_out\n");
-    out.push_str(&format!("            __gx_out=\"$(command {cmd} \"$@\")\" || return $?\n"));
+    out.push_str(&format!(
+        "            __gx_out=\"$(command {cmd} \"$@\")\" || return $?\n"
+    ));
     out.push_str("            if [ -n \"$__gx_out\" ] && [ -d \"$__gx_out\" ]; then\n");
     out.push_str("                cd \"$__gx_out\" || return 1\n");
     out.push_str("            elif [ -n \"$__gx_out\" ]; then\n");
@@ -222,7 +237,9 @@ fn bash_wrapper(name: &str, cmd: &str) -> String {
     out.push_str("    case \"$1\" in\n");
     out.push_str(&format!("        {})\n", NAV_COMMANDS.join("|")));
     out.push_str("            local __gx_out\n");
-    out.push_str(&format!("            __gx_out=\"$(command {cmd} \"$@\")\" || return $?\n"));
+    out.push_str(&format!(
+        "            __gx_out=\"$(command {cmd} \"$@\")\" || return $?\n"
+    ));
     out.push_str("            if [ -n \"$__gx_out\" ] && [ -d \"$__gx_out\" ]; then\n");
     out.push_str("                cd \"$__gx_out\" || return 1\n");
     out.push_str("            elif [ -n \"$__gx_out\" ]; then\n");
@@ -246,7 +263,9 @@ fn fish_wrapper(name: &str, cmd: &str) -> String {
     out.push_str(&format!("function {name}\n"));
     out.push_str("    switch \"$argv[1]\"\n");
     out.push_str(&format!("        case {}\n", NAV_COMMANDS.join(" ")));
-    out.push_str(&format!("            set -l __gx_out (command {cmd} $argv); or return $status\n"));
+    out.push_str(&format!(
+        "            set -l __gx_out (command {cmd} $argv); or return $status\n"
+    ));
     out.push_str("            if test -d \"$__gx_out\"\n");
     out.push_str("                cd \"$__gx_out\"\n");
     out.push_str("            else if test -n \"$__gx_out\"\n");
@@ -286,7 +305,9 @@ fn zsh_completions(name: &str, cmd: &str) -> String {
     out.push_str(&format!(
         "    source <(command {cmd} setup --completions zsh --name {name}) 2>/dev/null\n"
     ));
-    out.push_str("    # Dynamic completion: layer live candidates over the static (clap) completion.\n");
+    out.push_str(
+        "    # Dynamic completion: layer live candidates over the static (clap) completion.\n",
+    );
     out.push_str(&format!("    {dyn_fn}() {{\n"));
     // Run clap's static completion (adds flags/subcommands), then augment.
     out.push_str(&format!(
@@ -333,7 +354,9 @@ fn bash_completions(name: &str, cmd: &str) -> String {
     out.push_str(&format!(
         "    source <(command {cmd} setup --completions bash --name {name}) 2>/dev/null\n"
     ));
-    out.push_str("    # Dynamic completion: layer live candidates over the static (clap) completion.\n");
+    out.push_str(
+        "    # Dynamic completion: layer live candidates over the static (clap) completion.\n",
+    );
     out.push_str(&format!("    {dyn_fn}() {{\n"));
     out.push_str(&format!(
         "        declare -F {clap_fn} >/dev/null && {clap_fn} \"$@\"\n"
@@ -414,7 +437,10 @@ mod tests {
             ShellKind::Fish
         );
         // version-suffixed shells still resolve by substring
-        assert_eq!(shell_from_path(Some("/usr/local/bin/bash-5.2")), ShellKind::Bash);
+        assert_eq!(
+            shell_from_path(Some("/usr/local/bin/bash-5.2")),
+            ShellKind::Bash
+        );
     }
 
     #[test]
@@ -427,7 +453,10 @@ mod tests {
     #[test]
     fn test_zsh_wrapper_includes_noglob() {
         let wrapper = zsh_wrapper("gx", "gx");
-        assert!(wrapper.contains("noglob"), "zsh wrapper must contain noglob");
+        assert!(
+            wrapper.contains("noglob"),
+            "zsh wrapper must contain noglob"
+        );
     }
 
     #[test]
@@ -534,9 +563,15 @@ mod tests {
             "zsh must wire the dynamic helper via compdef"
         );
         // Delegates to clap's generated function so static flags still complete.
-        assert!(zsh.contains("_gx \"$@\""), "zsh wrapper must call clap's _gx");
+        assert!(
+            zsh.contains("_gx \"$@\""),
+            "zsh wrapper must call clap's _gx"
+        );
         // Actually adds live candidates for the relevant positions.
-        assert!(zsh.contains("compadd"), "zsh wrapper must compadd candidates");
+        assert!(
+            zsh.contains("compadd"),
+            "zsh wrapper must compadd candidates"
+        );
         // All four dynamic kinds are wired somewhere in the script.
         for kind in [
             "__complete workspaces",
@@ -556,7 +591,10 @@ mod tests {
             bash.contains("complete -F _gx_dynamic"),
             "bash must wire the dynamic helper via `complete -F`"
         );
-        assert!(bash.contains("_gx \"$@\""), "bash wrapper must call clap's _gx");
+        assert!(
+            bash.contains("_gx \"$@\""),
+            "bash wrapper must call clap's _gx"
+        );
         assert!(
             bash.contains("COMPREPLY+="),
             "bash wrapper must append live candidates to COMPREPLY"

@@ -7,13 +7,13 @@
 use crate::ai;
 use crate::commands::workspace;
 use crate::config::{self, Config};
-use crate::git::github;
 use crate::git::pr_actions::MergeMethod;
 use crate::git::pr_search::{self, Category, DashboardPr, EnrichStatus, Relation, Scope};
+use crate::git::{gh, github};
+use crate::output;
 use crate::ui;
 use crate::ui::pr_picker::{self, PrAction, ReviewerAgent};
 use miette::{Diagnostic, Result};
-use std::process::Command;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -30,7 +30,9 @@ pub enum PrCommandError {
     #[error("Pull request #{0} comes from a fork")]
     #[diagnostic(
         code(gx::pr::fork),
-        help("gx can only open a workspace for PRs whose branch lives in this repo. Use 'gh pr checkout {0}' instead.")
+        help(
+            "gx can only open a workspace for PRs whose branch lives in this repo. Use 'gh pr checkout {0}' instead."
+        )
     )]
     ForkPr(u64),
 
@@ -92,22 +94,14 @@ pub fn run_interactive() -> Result<()> {
         ai_fallback: cfg.pr.reviewer_ai_fallback,
     };
 
-    let mut terminal =
-        ui::terminal::setup_terminal_stderr().map_err(|e| PrCommandError::Tui(e.to_string()))?;
-    let result = pr_picker::run(
-        &mut terminal,
-        scopes,
-        default_index,
-        launch_repo,
-        agent,
-        merge_method,
-    );
-    ui::terminal::restore_terminal_stderr(terminal)
-        .map_err(|e| PrCommandError::Tui(e.to_string()))?;
+    let result = ui::terminal::with_terminal_stderr(|t| {
+        pr_picker::run(t, scopes, default_index, launch_repo, agent, merge_method)
+    })
+    .map_err(|e| PrCommandError::Tui(e.to_string()))?;
 
     match result? {
         None => {
-            eprintln!("Cancelled");
+            output::cancelled();
             Ok(())
         }
         Some(PrAction::OpenWorkspace(pr)) => open_workspace(&pr),
@@ -137,7 +131,7 @@ fn open_workspace(pr: &DashboardPr) -> Result<()> {
     }
     eprintln!("Opening workspace for #{} on '{}'…", pr.number, branch);
     let path = workspace::ensure_workspace_for_branch(&branch)?;
-    workspace::print_go_path(&path);
+    output::nav_path(&path);
     Ok(())
 }
 
@@ -160,7 +154,7 @@ will be treated as untrusted input.",
             pr.number, pr.author
         ))?;
         if !confirmed {
-            eprintln!("Cancelled");
+            output::cancelled();
             return Ok(());
         }
     }
@@ -201,15 +195,8 @@ reported problem, summarize your findings, and propose a fix.",
 /// The current GitHub login, for the troubleshoot own-PR check. `None` if `gh`
 /// is unavailable — the caller then errs on the side of confirming.
 fn current_login() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["api", "user", "--jq", ".login"])
-        .env("GH_PROMPT_DISABLED", "1")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let login = gh::capture(&["api", "user", "--jq", ".login"]).ok()?;
+    let login = login.trim().to_string();
     (!login.is_empty()).then_some(login)
 }
 
@@ -293,8 +280,7 @@ mod tests {
 
     #[test]
     fn test_build_scopes_from_repo_no_orgs() {
-        let (scopes, idx) =
-            build_scopes_from(Some(("o".to_string(), "r".to_string())), &[]);
+        let (scopes, idx) = build_scopes_from(Some(("o".to_string(), "r".to_string())), &[]);
         assert_eq!(
             scopes,
             vec![
@@ -310,10 +296,8 @@ mod tests {
 
     #[test]
     fn test_build_scopes_from_repo_with_orgs() {
-        let (scopes, idx) = build_scopes_from(
-            Some(("o".to_string(), "r".to_string())),
-            &["a".to_string()],
-        );
+        let (scopes, idx) =
+            build_scopes_from(Some(("o".to_string(), "r".to_string())), &["a".to_string()]);
         assert_eq!(scopes.len(), 3);
         assert!(matches!(scopes[1], Scope::Orgs(_)));
         assert_eq!(idx, 0);
