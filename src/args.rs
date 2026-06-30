@@ -143,6 +143,17 @@ pub enum Commands {
         action: Option<PrCommands>,
     },
 
+    /// Review a diff in a TUI and leave line comments for a coding agent
+    #[command(alias = "rev")]
+    Review {
+        /// Branch, commit, or A..B range to review (defaults to branch-vs-base)
+        target: Option<String>,
+
+        /// Base for the default branch-vs-base range (defaults to origin's default branch)
+        #[arg(long)]
+        base: Option<String>,
+    },
+
     /// Configure repo-specific workspace setup
     #[command(alias = "onboard")]
     Onboarding,
@@ -537,6 +548,7 @@ impl Commands {
                 None => commands::pr::run_interactive(),
                 Some(PrCommands::List) => commands::pr::run_list(),
             },
+            Commands::Review { target, base } => commands::review::run(target, base),
             Commands::Setup {
                 shell,
                 completions,
