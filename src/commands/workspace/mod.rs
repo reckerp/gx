@@ -8,6 +8,13 @@
 //! re-exported so callers (args.rs, sibling command modules) use
 //! `commands::workspace::*` regardless of the internal split.
 
+// The thiserror/miette-derived impls bind WorkspaceError's struct-variant
+// fields; a recent rustc's `unused_assignments` lint misattributes a
+// generated-code assignment to the field spans and reports them as "never
+// read", even though they are used in the `#[error("…")]` messages. Silence the
+// false positive for this module.
+#![allow(unused_assignments)]
+
 mod create;
 mod lifecycle;
 mod navigate;
