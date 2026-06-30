@@ -2,4 +2,5 @@
 //! (and, in later units, building the structured diff model and persisting
 //! review state).
 
+pub mod diff;
 pub mod range;
