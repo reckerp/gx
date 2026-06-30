@@ -628,7 +628,7 @@ fn in_ranges(byte: usize, ranges: &[(usize, usize)]) -> bool {
     ranges.iter().any(|&(s, e)| byte >= s && byte < e)
 }
 
-fn segs<'a>(hl: &'a [Vec<Segment>], line_no: Option<usize>) -> &'a [Segment] {
+fn segs(hl: &[Vec<Segment>], line_no: Option<usize>) -> &[Segment] {
     line_no
         .and_then(|n| hl.get(n.saturating_sub(1)))
         .map(|v| v.as_slice())
