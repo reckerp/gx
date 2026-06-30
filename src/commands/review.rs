@@ -7,9 +7,14 @@ use crate::ui;
 use miette::Result;
 
 pub fn run(target: Option<String>, base: Option<String>) -> Result<()> {
-    let range = range::resolve(target, base)?;
-    let files = diff::changed_files(&range)?;
     let cfg = config::load()?;
+    // Honor [review] default_mode when no explicit target/base is given.
+    let range = if target.is_none() && base.is_none() && cfg.review.default_mode == "uncommitted" {
+        range::resolve_uncommitted()?
+    } else {
+        range::resolve(target, base)?
+    };
+    let files = diff::changed_files(&range)?;
 
     // Detect the terminal appearance before the TUI takes over the terminal, and
     // pick a matching syntect theme when none is configured.

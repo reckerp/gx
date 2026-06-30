@@ -583,7 +583,8 @@ fn marker_span<'a>(marked: bool, cursor: bool, pal: Palette) -> Span<'a> {
     } else {
         (" ", Color::Reset)
     };
-    Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
+    // `ch` is a &'static str literal — no per-line allocation.
+    Span::styled(ch, Style::default().fg(fg).bg(bg))
 }
 
 fn pair_marked(left: Option<&Row>, right: Option<&Row>, marks: &Marks) -> bool {

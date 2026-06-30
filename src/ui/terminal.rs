@@ -116,9 +116,11 @@ pub fn suspend<R>(terminal: &mut Term, f: impl FnOnce() -> R) -> io::Result<R> {
 
     let result = f();
 
+    // Mark the TTY active *before* re-entering so the panic hook (and the
+    // outer guard) can still restore it if a re-entry step fails or panics.
+    ACTIVE_TTY.store(1, Ordering::SeqCst);
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
-    ACTIVE_TTY.store(1, Ordering::SeqCst);
     terminal.clear()?;
     Ok(result)
 }

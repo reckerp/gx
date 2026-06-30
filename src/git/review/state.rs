@@ -110,10 +110,25 @@ impl ReviewState {
                 .find(|r| line_of(r, side) == Some(line))
                 .map(|r| r.text.clone())
         };
-        let find_text = |side: Side, text: &str| -> Option<usize> {
-            rows.iter()
-                .find(|r| r.text == text && line_of(r, side).is_some())
-                .and_then(|r| line_of(r, side))
+        // Re-anchor a moved comment to the matching line *nearest* its original
+        // position; when the two nearest matches are equidistant the choice is
+        // ambiguous, so orphan rather than guess (duplicate `anchor_text` like
+        // blank lines or `}` is common).
+        let find_nearest = |side: Side, text: &str, origin: usize| -> Option<usize> {
+            let mut candidates: Vec<usize> = rows
+                .iter()
+                .filter(|r| r.text == text)
+                .filter_map(|r| line_of(r, side))
+                .collect();
+            if candidates.is_empty() {
+                return None;
+            }
+            let dist = |l: usize| (l as isize - origin as isize).unsigned_abs();
+            candidates.sort_by_key(|&l| dist(l));
+            if candidates.len() >= 2 && dist(candidates[0]) == dist(candidates[1]) {
+                return None; // ambiguous -> orphan
+            }
+            Some(candidates[0])
         };
 
         let (mine, rest): (Vec<Comment>, Vec<Comment>) =
@@ -125,7 +140,7 @@ impl ReviewState {
         for mut c in mine {
             if text_at(c.side, c.start_line).as_deref() == Some(c.anchor_text.as_str()) {
                 self.comments.push(c); // still anchored at the same line
-            } else if let Some(new_line) = find_text(c.side, &c.anchor_text) {
+            } else if let Some(new_line) = find_nearest(c.side, &c.anchor_text, c.start_line) {
                 let span = c.end_line - c.start_line;
                 c.start_line = new_line;
                 c.end_line = new_line + span;
@@ -195,7 +210,11 @@ pub fn save(key: &str, state: &ReviewState) -> std::io::Result<()> {
     };
     let json = serde_json::to_string_pretty(&persisted)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(state_path(key), json)
+    // Atomic write: a crash mid-write must not corrupt a resumable review.
+    let path = state_path(key);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)
 }
 
 /// Delete the saved review for `key` (the reset action).
@@ -363,5 +382,57 @@ mod tests {
         assert_eq!(moved.start_line, 2);
         assert_eq!(s.orphaned.len(), 1);
         assert_eq!(s.orphaned[0].body, "orphan");
+    }
+
+    #[test]
+    fn reanchor_duplicate_text_picks_nearest_else_orphans() {
+        use crate::git::review::diff::{Hunk, RowKind};
+        use crate::git::status::FileStatus;
+
+        let row = |new_no, text: &str| Row {
+            kind: RowKind::Added,
+            old_no: None,
+            new_no: Some(new_no),
+            text: text.into(),
+            emphasis: vec![],
+        };
+        // "dup" appears on new lines 2 and 8.
+        let diff = FileDiff {
+            path: "a.rs".into(),
+            old_path: None,
+            status: FileStatus::Modified,
+            is_binary: false,
+            too_large: false,
+            hunks: vec![Hunk {
+                header: "@@".into(),
+                rows: vec![row(2, "dup"), row(5, "mid"), row(8, "dup")],
+            }],
+        };
+
+        let mut s = ReviewState::default();
+        // Was at line 7 -> nearest "dup" is line 8.
+        s.add(Comment {
+            file: "a.rs".into(),
+            side: Side::New,
+            start_line: 7,
+            end_line: 7,
+            anchor_text: "dup".into(),
+            body: "near8".into(),
+        });
+        // Was at line 5 -> equidistant from 2 and 8 -> ambiguous -> orphan.
+        s.add(Comment {
+            file: "a.rs".into(),
+            side: Side::New,
+            start_line: 5,
+            end_line: 5,
+            anchor_text: "dup".into(),
+            body: "ambiguous".into(),
+        });
+
+        s.reanchor_file("a.rs", &diff);
+
+        let near = s.comments.iter().find(|c| c.body == "near8").unwrap();
+        assert_eq!(near.start_line, 8);
+        assert!(s.orphaned.iter().any(|c| c.body == "ambiguous"));
     }
 }

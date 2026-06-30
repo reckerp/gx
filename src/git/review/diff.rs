@@ -19,6 +19,9 @@ const CONTEXT_LINES: usize = 3;
 /// Files larger than this (on either side) skip diffing and render a placeholder
 /// rather than stalling the UI on a huge generated/vendored file.
 const MAX_LINES: usize = 5000;
+/// Byte ceiling checked before any content scan, so a huge blob is not fully
+/// UTF-8-converted and line-scanned just to discover it is over the line cap.
+const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// What kind of line a row represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,10 @@ impl ChangedFile {
         let repo = get_repo()?;
         let (old_bytes, new_bytes) = self.load_raw(&repo, to);
 
+        // Bail on oversized blobs before scanning/decoding them.
+        if old_bytes.len() > MAX_BYTES || new_bytes.len() > MAX_BYTES {
+            return Ok(self.empty_diff(false, true));
+        }
         if looks_binary(&old_bytes) || looks_binary(&new_bytes) {
             return Ok(self.empty_diff(true, false));
         }

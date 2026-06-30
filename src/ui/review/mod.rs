@@ -765,6 +765,9 @@ impl App {
             KeyCode::Char('t') => range::resolve_branch(None).map(|mut r| {
                 r.to = Endpoint::WorkingTree;
                 r.label = format!("{} +worktree", r.label);
+                // Distinct scope so the +worktree review doesn't share a
+                // persistence key (and re-anchor baseline) with committed branch.
+                r.scope_id = format!("{}+worktree", r.scope_id);
                 r
             }),
             _ => return,
@@ -788,12 +791,19 @@ impl App {
         match diff::changed_files(&new_range) {
             Ok(files) => {
                 self.cache = (0..files.len()).map(|_| None).collect();
+                // Rebuild the sidebar tree for the new file set — otherwise its
+                // file indices point into the old list and selecting one can
+                // index past `files`.
+                self.tree = FileTree::new(files.iter().map(|f| (f.path.clone(), f.status)));
                 self.files = files;
                 self.range = new_range;
                 self.selected = 0;
                 self.cursor = 0;
                 self.v_scroll = 0;
                 self.h_scroll = 0;
+                self.tree_cursor = 0;
+                self.filter.clear();
+                self.focus = Focus::Diff;
                 self.view_override = None;
                 self.key = crate::git::worktree::common_git_dir()
                     .ok()
@@ -834,6 +844,12 @@ impl App {
         let view = self.view_mode(diff_area.width);
         self.last_view = view;
         self.last_diff_height = diff_area.height.saturating_sub(2) as usize;
+        // A view-mode or width change can shrink the line count; keep the cursor in range.
+        let line_count = self.cur_line_count();
+        if line_count > 0 && self.cursor >= line_count {
+            self.cursor = line_count - 1;
+            self.ensure_cursor_visible();
+        }
 
         let marks = self
             .current_path()
