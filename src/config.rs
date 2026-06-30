@@ -65,6 +65,9 @@ pub struct Config {
 
     #[serde(default)]
     pub pr: PrConfig,
+
+    #[serde(default)]
+    pub review: ReviewConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,6 +101,45 @@ impl Default for PrConfig {
             orgs: Vec::new(),
             merge_method: default_merge_method(),
             reviewer_ai_fallback: default_reviewer_ai_fallback(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReviewConfig {
+    /// syntect theme name for diff syntax highlighting (e.g. "base16-ocean.dark").
+    #[serde(default = "default_review_theme")]
+    pub theme: String,
+
+    /// Minimum terminal width (columns) for side-by-side; below this the diff
+    /// falls back to a unified single-column view.
+    #[serde(default = "default_side_by_side_min_width")]
+    pub side_by_side_min_width: u16,
+
+    /// Default range mode when none is given on the CLI: "branch", "commit",
+    /// or "uncommitted".
+    #[serde(default = "default_review_mode")]
+    pub default_mode: String,
+}
+
+fn default_review_theme() -> String {
+    "base16-ocean.dark".to_string()
+}
+
+fn default_side_by_side_min_width() -> u16 {
+    120
+}
+
+fn default_review_mode() -> String {
+    "branch".to_string()
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        ReviewConfig {
+            theme: default_review_theme(),
+            side_by_side_min_width: default_side_by_side_min_width(),
+            default_mode: default_review_mode(),
         }
     }
 }
@@ -226,6 +268,7 @@ impl Default for Config {
             ai: AiConfig::default(),
             workspace: WorkspaceConfig::default(),
             pr: PrConfig::default(),
+            review: ReviewConfig::default(),
         }
     }
 }
@@ -253,6 +296,15 @@ pub fn load_path() -> miette::Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_review_config() {
+        let review = ReviewConfig::default();
+        assert_eq!(review.theme, "base16-ocean.dark");
+        assert_eq!(review.side_by_side_min_width, 120);
+        assert_eq!(review.default_mode, "branch");
+        assert_eq!(Config::default().review.theme, "base16-ocean.dark");
+    }
 
     #[test]
     fn test_default_config() {
