@@ -5,8 +5,10 @@
 //! the line moved (persistence and re-anchoring land in U7). The `Serialize`
 //! derives are present now so U7 can persist this type unchanged.
 
+use crate::git::review::diff::{FileDiff, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Which side of the diff a comment is anchored to. New-side anchors carry the
 /// post-change line number an agent can act on; old-side anchors mark removed
@@ -29,10 +31,12 @@ pub struct Comment {
     pub body: String,
 }
 
-/// All comments left in the current review session.
+/// All comments left in the current review session, plus any that could not be
+/// re-anchored to the current diff on resume.
 #[derive(Debug, Default)]
 pub struct ReviewState {
     pub comments: Vec<Comment>,
+    pub orphaned: Vec<Comment>,
 }
 
 /// Line numbers, per side, that carry a comment in one file — used to draw
@@ -90,6 +94,117 @@ impl ReviewState {
         }
         marks
     }
+
+    /// Re-anchor this file's comments against its freshly-built diff. A comment
+    /// whose anchored line still holds the same text stays; one whose
+    /// `anchor_text` moved is re-anchored to the new line; one that no longer
+    /// resolves is moved to `orphaned` rather than dropped.
+    pub fn reanchor_file(&mut self, file: &str, diff: &FileDiff) {
+        let rows: Vec<&Row> = diff.hunks.iter().flat_map(|h| &h.rows).collect();
+        let line_of = |row: &Row, side: Side| match side {
+            Side::New => row.new_no,
+            Side::Old => row.old_no,
+        };
+        let text_at = |side: Side, line: usize| -> Option<String> {
+            rows.iter()
+                .find(|r| line_of(r, side) == Some(line))
+                .map(|r| r.text.clone())
+        };
+        let find_text = |side: Side, text: &str| -> Option<usize> {
+            rows.iter()
+                .find(|r| r.text == text && line_of(r, side).is_some())
+                .and_then(|r| line_of(r, side))
+        };
+
+        let (mine, rest): (Vec<Comment>, Vec<Comment>) =
+            std::mem::take(&mut self.comments)
+                .into_iter()
+                .partition(|c| c.file == file);
+        self.comments = rest;
+
+        for mut c in mine {
+            if text_at(c.side, c.start_line).as_deref() == Some(c.anchor_text.as_str()) {
+                self.comments.push(c); // still anchored at the same line
+            } else if let Some(new_line) = find_text(c.side, &c.anchor_text) {
+                let span = c.end_line - c.start_line;
+                c.start_line = new_line;
+                c.end_line = new_line + span;
+                self.comments.push(c);
+            } else {
+                self.orphaned.push(c);
+            }
+        }
+    }
+}
+
+// --- Persistence (ephemeral, never committed) -------------------------------
+
+#[derive(Serialize, Deserialize, Default)]
+struct Persisted {
+    comments: Vec<Comment>,
+    #[serde(default)]
+    orphaned: Vec<Comment>,
+}
+
+/// Stable storage key for a review: an FNV-1a digest of the clone's shared git
+/// dir and the range scope. FNV-1a (not `DefaultHasher`) keeps the key stable
+/// across Rust toolchains; the common git dir (not the per-worktree path) keeps
+/// a branch's review identical across worktrees of one clone.
+pub fn storage_key(common_git_dir: &Path, scope_id: &str) -> String {
+    fnv1a_hex(&format!("{}\0{}", common_git_dir.display(), scope_id))
+}
+
+fn fnv1a_hex(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn state_dir() -> PathBuf {
+    std::env::temp_dir().join("gx-review")
+}
+
+fn state_path(key: &str) -> PathBuf {
+    state_dir().join(format!("{key}.json"))
+}
+
+/// Load saved review state for `key`. Missing or unreadable state yields an
+/// empty review rather than an error.
+pub fn load(key: &str) -> ReviewState {
+    let Ok(data) = std::fs::read_to_string(state_path(key)) else {
+        return ReviewState::default();
+    };
+    match serde_json::from_str::<Persisted>(&data) {
+        Ok(p) => ReviewState {
+            comments: p.comments,
+            orphaned: p.orphaned,
+        },
+        Err(_) => ReviewState::default(),
+    }
+}
+
+/// Persist review state for `key` to the ephemeral temp location.
+pub fn save(key: &str, state: &ReviewState) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir())?;
+    let persisted = Persisted {
+        comments: state.comments.clone(),
+        orphaned: state.orphaned.clone(),
+    };
+    let json = serde_json::to_string_pretty(&persisted)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(state_path(key), json)
+}
+
+/// Delete the saved review for `key` (the reset action).
+pub fn reset(key: &str) -> std::io::Result<()> {
+    let path = state_path(key);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -147,5 +262,106 @@ mod tests {
         assert!(marks.new.contains(&3) && marks.new.contains(&5));
         assert!(!marks.new.contains(&2));
         assert!(marks.old.contains(&9));
+    }
+
+    #[test]
+    fn storage_key_is_stable_and_scope_sensitive() {
+        let dir = Path::new("/clones/gx/.git");
+        let k1 = storage_key(dir, "branch:feat-review");
+        // Deterministic across calls (FNV-1a, not DefaultHasher).
+        assert_eq!(k1, storage_key(dir, "branch:feat-review"));
+        // 16 hex chars.
+        assert_eq!(k1.len(), 16);
+        // Differs by scope and by clone dir.
+        assert_ne!(k1, storage_key(dir, "branch:main"));
+        assert_ne!(k1, storage_key(Path::new("/other/.git"), "branch:feat-review"));
+    }
+
+    #[test]
+    fn save_load_reset_roundtrip() {
+        // Unique key so the test doesn't collide with a real review or others.
+        let key = storage_key(Path::new("/test/gx-state-test"), "branch:unit-test-xyz");
+        let _ = reset(&key);
+
+        let mut s = ReviewState::default();
+        s.add(comment("a.rs", Side::New, 4, 4));
+        save(&key, &s).expect("save");
+
+        let loaded = load(&key);
+        assert_eq!(loaded.total(), 1);
+        assert_eq!(loaded.comments[0].file, "a.rs");
+
+        reset(&key).expect("reset");
+        assert_eq!(load(&key).total(), 0); // missing file -> empty
+    }
+
+    #[test]
+    fn reanchor_keeps_moves_and_orphans() {
+        use crate::git::review::diff::{Hunk, RowKind};
+        use crate::git::status::FileStatus;
+
+        let diff = FileDiff {
+            path: "a.rs".into(),
+            old_path: None,
+            status: FileStatus::Modified,
+            is_binary: false,
+            too_large: false,
+            hunks: vec![Hunk {
+                header: "@@".into(),
+                rows: vec![
+                    Row {
+                        kind: RowKind::Context,
+                        old_no: Some(1),
+                        new_no: Some(1),
+                        text: "alpha".into(),
+                        emphasis: vec![],
+                    },
+                    Row {
+                        kind: RowKind::Added,
+                        old_no: None,
+                        new_no: Some(2),
+                        text: "beta".into(),
+                        emphasis: vec![],
+                    },
+                ],
+            }],
+        };
+
+        let mut s = ReviewState::default();
+        // Stays: anchored at new line 1 with matching text.
+        s.add(Comment {
+            file: "a.rs".into(),
+            side: Side::New,
+            start_line: 1,
+            end_line: 1,
+            anchor_text: "alpha".into(),
+            body: "keep".into(),
+        });
+        // Moves: text "beta" now lives on new line 2, comment thinks line 5.
+        s.add(Comment {
+            file: "a.rs".into(),
+            side: Side::New,
+            start_line: 5,
+            end_line: 5,
+            anchor_text: "beta".into(),
+            body: "moved".into(),
+        });
+        // Orphans: anchor_text gone.
+        s.add(Comment {
+            file: "a.rs".into(),
+            side: Side::New,
+            start_line: 9,
+            end_line: 9,
+            anchor_text: "vanished".into(),
+            body: "orphan".into(),
+        });
+
+        s.reanchor_file("a.rs", &diff);
+
+        assert_eq!(s.comments.len(), 2);
+        let moved = s.comments.iter().find(|c| c.body == "moved").unwrap();
+        assert_eq!(moved.start_line, 2);
+        assert_eq!(s.orphaned.len(), 1);
+        assert_eq!(s.orphaned[0].body, "orphan");
     }
 }

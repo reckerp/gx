@@ -9,7 +9,7 @@ pub mod highlight;
 use crate::git::review::blob;
 use crate::git::review::diff::ChangedFile;
 use crate::git::review::range::ReviewRange;
-use crate::git::review::state::{Comment, Marks, ReviewState, Side};
+use crate::git::review::state::{self, Comment, Marks, ReviewState, Side};
 use crate::ui::terminal::with_terminal;
 use crate::ui::{render_help_bar, status_char, status_color};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -28,6 +28,7 @@ enum Mode {
     Normal,
     VisualSelect,
     CommentPopup,
+    OrphanedList,
     Help,
 }
 
@@ -83,6 +84,10 @@ fn run_loop(
             break;
         }
     }
+    // Persist the review (best-effort) so it resumes next launch.
+    if let Some(key) = &app.key {
+        let _ = state::save(key, &app.review);
+    }
     Ok(app.finish_message.take())
 }
 
@@ -105,6 +110,8 @@ struct App {
     select_anchor: Option<usize>,
     status: Option<String>,
     finish_message: Option<String>,
+    key: Option<String>,
+    pending_reset: bool,
     pending_bracket: Option<char>,
     last_diff_height: usize,
     last_view: ViewMode,
@@ -113,13 +120,20 @@ struct App {
 impl App {
     fn new(range: ReviewRange, files: Vec<ChangedFile>, theme: &str, min_width: u16) -> Self {
         let cache = (0..files.len()).map(|_| None).collect();
+        // Key persistence on the clone's shared git dir + the range scope, then
+        // resume any saved review for this (clone, scope).
+        let key = crate::git::worktree::common_git_dir()
+            .ok()
+            .map(|dir| state::storage_key(&dir, &range.scope_id));
+        let review = key.as_deref().map(state::load).unwrap_or_default();
+
         App {
             range,
             files,
             selected: 0,
             cache,
             highlighter: Highlighter::new(theme),
-            review: ReviewState::default(),
+            review,
             cursor: 0,
             v_scroll: 0,
             h_scroll: 0,
@@ -132,6 +146,8 @@ impl App {
             select_anchor: None,
             status: None,
             finish_message: None,
+            key,
+            pending_reset: false,
             pending_bracket: None,
             last_diff_height: 1,
             last_view: ViewMode::SideBySide,
@@ -148,6 +164,9 @@ impl App {
             &self.highlighter,
         )
         .into_diagnostic()?;
+        // Re-anchor any resumed comments for this file against its current diff.
+        let path = self.files[self.selected].path.clone();
+        self.review.reanchor_file(&path, &rf.diff);
         self.cache[self.selected] = Some(rf);
         Ok(())
     }
@@ -200,11 +219,23 @@ impl App {
                 self.handle_visual_key(key);
                 false
             }
+            Mode::OrphanedList => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o')
+                ) {
+                    self.mode = Mode::Normal;
+                }
+                false
+            }
             Mode::Normal => self.handle_normal_key(key),
         }
     }
 
     fn handle_normal_key(&mut self, key: event::KeyEvent) -> bool {
+        // Any Normal-mode key disarms a pending reset (except a second X below).
+        let reset_armed = std::mem::take(&mut self.pending_reset);
+
         // Resolve a pending `]`/`[` chord (vim diff motions ]c / [c).
         if let Some(bracket) = self.pending_bracket.take()
             && key.code == KeyCode::Char('c')
@@ -257,6 +288,22 @@ impl App {
             (KeyCode::Enter, _) => self.edit_comment_under_cursor(),
             (KeyCode::Char('D'), _) => self.delete_comment_under_cursor(),
             (KeyCode::Char('F'), _) => return self.finish(),
+
+            (KeyCode::Char('o'), _) => {
+                if self.review.orphaned.is_empty() {
+                    self.status = Some("No orphaned comments".into());
+                } else {
+                    self.mode = Mode::OrphanedList;
+                }
+            }
+            (KeyCode::Char('X'), _) => {
+                if reset_armed {
+                    self.reset_review();
+                } else {
+                    self.pending_reset = true;
+                    self.status = Some("Press X again to discard this review".into());
+                }
+            }
 
             (KeyCode::Char('v'), _) => self.toggle_view(),
             (KeyCode::Char('b'), _) => self.show_sidebar = !self.show_sidebar,
@@ -504,6 +551,14 @@ impl App {
         true
     }
 
+    fn reset_review(&mut self) {
+        if let Some(key) = &self.key {
+            let _ = state::reset(key);
+        }
+        self.review = ReviewState::default();
+        self.status = Some("Review discarded.".into());
+    }
+
     // --- rendering --------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
@@ -556,8 +611,42 @@ impl App {
         match self.mode {
             Mode::Help => self.draw_help_overlay(f, area),
             Mode::CommentPopup => self.draw_popup(f, area),
+            Mode::OrphanedList => self.draw_orphans(f, area),
             _ => {}
         }
+    }
+
+    fn draw_orphans(&self, f: &mut Frame, area: Rect) {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "Orphaned comments (no longer resolve to a diff line)",
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+        ];
+        for c in &self.review.orphaned {
+            let loc = blob::location(c.side, c.start_line, c.end_line);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} {loc}", c.file),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw("  "),
+                Span::raw(c.body.lines().next().unwrap_or("").to_string()),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "esc to close",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let popup = centered_rect(70, 60, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Orphaned comments ");
+        f.render_widget(Paragraph::new(lines).block(block), popup);
     }
 
     fn draw_empty(&self, f: &mut Frame, area: Rect) {
@@ -645,6 +734,7 @@ impl App {
                 ("Tab", "file"),
                 ("v", "view"),
                 ("F", "finish"),
+                ("X", "reset"),
                 ("?", "help"),
                 ("q", "quit"),
             ],
@@ -655,6 +745,7 @@ impl App {
                 ("⏎", "newline"),
                 ("esc", "cancel"),
             ],
+            Mode::OrphanedList => &[("esc", "close")],
             Mode::Help => &[("esc", "close")],
         };
         render_help_bar(hints)
@@ -718,6 +809,8 @@ impl App {
             Line::raw("⏎              edit the comment under the cursor"),
             Line::raw("D              delete the comment under the cursor"),
             Line::raw("F              finish: copy the review to the clipboard"),
+            Line::raw("o              list orphaned comments (after a diff change)"),
+            Line::raw("X              discard the saved review (press twice)"),
             Line::raw("v              toggle split / unified"),
             Line::raw("b              toggle sidebar"),
             Line::raw("? / esc        close this help"),
