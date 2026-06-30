@@ -92,7 +92,12 @@ pub fn spawn_summary_lookup(worktrees: &[Worktree]) -> SummaryLookup {
 pub fn pending_summaries(worktrees: &[Worktree]) -> HashMap<PathBuf, WorktreeSummary> {
     worktrees
         .iter()
-        .map(|worktree| (worktree.path.clone(), WorktreeSummary::pending_for(worktree)))
+        .map(|worktree| {
+            (
+                worktree.path.clone(),
+                WorktreeSummary::pending_for(worktree),
+            )
+        })
         .collect()
 }
 
@@ -201,8 +206,11 @@ pub fn apply_pull_requests(
 }
 
 pub fn summarize(worktree: &Worktree) -> Result<WorktreeSummary, GitError> {
-    let status_output =
-        git_exec::exec_in(&worktree.path, &["status", "--porcelain"], ExecOptions::capture())?;
+    let status_output = git_exec::exec_in(
+        &worktree.path,
+        &["status", "--porcelain"],
+        ExecOptions::capture(),
+    )?;
 
     let (tracked_changes, untracked_changes) = parse_status_counts(&status_output);
     let (ahead, behind) = match worktree.branch {

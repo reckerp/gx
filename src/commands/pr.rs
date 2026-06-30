@@ -5,12 +5,12 @@
 //! and a confirmation before running against a PR you did not author.
 
 use crate::ai;
-use crate::output;
 use crate::commands::workspace;
 use crate::config::{self, Config};
 use crate::git::pr_actions::MergeMethod;
 use crate::git::pr_search::{self, Category, DashboardPr, EnrichStatus, Relation, Scope};
 use crate::git::{gh, github};
+use crate::output;
 use crate::ui;
 use crate::ui::pr_picker::{self, PrAction, ReviewerAgent};
 use miette::{Diagnostic, Result};
@@ -30,7 +30,9 @@ pub enum PrCommandError {
     #[error("Pull request #{0} comes from a fork")]
     #[diagnostic(
         code(gx::pr::fork),
-        help("gx can only open a workspace for PRs whose branch lives in this repo. Use 'gh pr checkout {0}' instead.")
+        help(
+            "gx can only open a workspace for PRs whose branch lives in this repo. Use 'gh pr checkout {0}' instead."
+        )
     )]
     ForkPr(u64),
 
@@ -278,8 +280,7 @@ mod tests {
 
     #[test]
     fn test_build_scopes_from_repo_no_orgs() {
-        let (scopes, idx) =
-            build_scopes_from(Some(("o".to_string(), "r".to_string())), &[]);
+        let (scopes, idx) = build_scopes_from(Some(("o".to_string(), "r".to_string())), &[]);
         assert_eq!(
             scopes,
             vec![
@@ -295,10 +296,8 @@ mod tests {
 
     #[test]
     fn test_build_scopes_from_repo_with_orgs() {
-        let (scopes, idx) = build_scopes_from(
-            Some(("o".to_string(), "r".to_string())),
-            &["a".to_string()],
-        );
+        let (scopes, idx) =
+            build_scopes_from(Some(("o".to_string(), "r".to_string())), &["a".to_string()]);
         assert_eq!(scopes.len(), 3);
         assert!(matches!(scopes[1], Scope::Orgs(_)));
         assert_eq!(idx, 0);

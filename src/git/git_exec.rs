@@ -185,6 +185,8 @@ mod tests {
     fn test_map_git_error_command_failed() {
         let stderr = "some other error".to_string();
         let error = map_git_error(stderr.clone(), Some(1));
-        assert!(matches!(error, GitError::CommandFailed { stderr: s, code } if s == stderr && code == Some(1)));
+        assert!(
+            matches!(error, GitError::CommandFailed { stderr: s, code } if s == stderr && code == Some(1))
+        );
     }
 }

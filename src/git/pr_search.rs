@@ -425,9 +425,7 @@ const ENRICH_WORKERS: usize = 8;
 /// each completes. Modeled on [`crate::git::pull_request::spawn_lookup`] so the
 /// caller (the TUI) never blocks — the `thread::scope` join happens on the
 /// detached coordinator, not in this function.
-pub fn spawn_enrichment(
-    prs: &[DashboardPr],
-) -> Receiver<(PrId, Result<EnrichedStatus, PrError>)> {
+pub fn spawn_enrichment(prs: &[DashboardPr]) -> Receiver<(PrId, Result<EnrichedStatus, PrError>)> {
     let (tx, rx) = mpsc::channel();
     let ids: Vec<PrId> = prs.iter().map(DashboardPr::id).collect();
 
@@ -727,7 +725,10 @@ mod tests {
         };
         // #1 is in both relations; #2 authored only; #3 review-requested only.
         let authored = vec![make(1, Relation::Authored), make(2, Relation::Authored)];
-        let review = vec![make(1, Relation::ReviewRequested), make(3, Relation::ReviewRequested)];
+        let review = vec![
+            make(1, Relation::ReviewRequested),
+            make(3, Relation::ReviewRequested),
+        ];
 
         let merged = dedup_prs(authored, review);
         assert_eq!(merged.len(), 3);
@@ -815,7 +816,10 @@ mod tests {
         let p = pr(
             Relation::Authored,
             false,
-            enriched(None, vec![ReviewState::Approved, ReviewState::ChangesRequested]),
+            enriched(
+                None,
+                vec![ReviewState::Approved, ReviewState::ChangesRequested],
+            ),
         );
         assert_eq!(categorize(&p), Category::ChangesRequested);
     }

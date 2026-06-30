@@ -286,8 +286,7 @@ mod tests {
         // Serialize a config with the new fields and read it back, exercising
         // both the Serialize and Deserialize derives end-to-end.
         let mut config = Config::default();
-        config.workspace.protected_branches =
-            vec!["staging".to_string(), "release".to_string()];
+        config.workspace.protected_branches = vec!["staging".to_string(), "release".to_string()];
         config.workspace.clean.threshold_days = 10;
         config.workspace.clean.auto = true;
 

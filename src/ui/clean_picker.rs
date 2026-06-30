@@ -79,9 +79,7 @@ impl CleanRow {
     fn selection_key(&self) -> Option<String> {
         match self {
             CleanRow::Header(_) => None,
-            CleanRow::Workspace { worktree, .. } => {
-                Some(format!("ws:{}", worktree.path.display()))
-            }
+            CleanRow::Workspace { worktree, .. } => Some(format!("ws:{}", worktree.path.display())),
             CleanRow::OrphanBranch { name, .. } | CleanRow::GoneBranch { name, .. } => {
                 Some(format!("branch:{}", name))
             }
@@ -262,16 +260,14 @@ fn render_row<'a>(
         Style::default().fg(Color::White)
     };
 
-    let mut spans = vec![
-        Span::styled(
-            format!("  {} ", checkbox),
-            if is_selected {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            },
-        ),
-    ];
+    let mut spans = vec![Span::styled(
+        format!("  {} ", checkbox),
+        if is_selected {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    )];
 
     match row {
         CleanRow::Workspace {
@@ -444,8 +440,7 @@ pub fn run(
                 match mode {
                     Mode::List => {
                         let visible_height = chunks[0].height.saturating_sub(2) as usize;
-                        scroll_offset =
-                            adjust_scroll(highlighted, scroll_offset, visible_height);
+                        scroll_offset = adjust_scroll(highlighted, scroll_offset, visible_height);
 
                         let items: Vec<ListItem> = rows
                             .iter()
@@ -723,7 +718,10 @@ mod tests {
         assert_eq!(action.remove_worktrees[0].name, "old-ws");
         let mut branches = action.delete_branches.clone();
         branches.sort();
-        assert_eq!(branches, vec!["gone-branch".to_string(), "orphan".to_string()]);
+        assert_eq!(
+            branches,
+            vec!["gone-branch".to_string(), "orphan".to_string()]
+        );
     }
 
     #[test]
@@ -758,9 +756,7 @@ mod tests {
         let rows = build_rows(&inputs);
         let age = rows.iter().find_map(|r| match r {
             CleanRow::Workspace {
-                worktree,
-                age_days,
-                ..
+                worktree, age_days, ..
             } if worktree.path == removable_path => Some(*age_days),
             _ => None,
         });
@@ -769,9 +765,7 @@ mod tests {
         // A workspace with no precomputed age falls back to None ("age?").
         let missing = rows.iter().find_map(|r| match r {
             CleanRow::Workspace {
-                worktree,
-                age_days,
-                ..
+                worktree, age_days, ..
             } if worktree.name == "current-ws" => Some(*age_days),
             _ => None,
         });

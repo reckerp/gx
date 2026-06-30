@@ -53,7 +53,10 @@ fn category_color(c: Category) -> Color {
 #[derive(Clone)]
 enum Mode {
     List,
-    ConfirmMerge { pr: Box<DashboardPr>, method: MergeMethod },
+    ConfirmMerge {
+        pr: Box<DashboardPr>,
+        method: MergeMethod,
+    },
     Reviewers,
     Help,
 }
@@ -158,7 +161,11 @@ fn build_display(prs: &[DashboardPr], query: &str) -> Display {
     Display { rows, prs: ordered }
 }
 
-fn pr_row_spans(pr: &DashboardPr, is_selected: bool, launch_repo: &Option<(String, String)>) -> Line<'static> {
+fn pr_row_spans(
+    pr: &DashboardPr,
+    is_selected: bool,
+    launch_repo: &Option<(String, String)>,
+) -> Line<'static> {
     let title_style = if is_selected {
         Style::default().fg(Color::Yellow).bold()
     } else {
@@ -166,15 +173,21 @@ fn pr_row_spans(pr: &DashboardPr, is_selected: bool, launch_repo: &Option<(Strin
     };
 
     let mut spans = vec![
-        Span::styled(format!("    #{} ", pr.number), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("    #{} ", pr.number),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(truncate(&pr.title, 60), title_style),
     ];
 
     match &pr.status {
-        EnrichStatus::Loading => spans.push(Span::styled(" …", Style::default().fg(Color::DarkGray))),
-        EnrichStatus::Failed => {
-            spans.push(Span::styled(" status?", Style::default().fg(Color::DarkGray)))
+        EnrichStatus::Loading => {
+            spans.push(Span::styled(" …", Style::default().fg(Color::DarkGray)))
         }
+        EnrichStatus::Failed => spans.push(Span::styled(
+            " status?",
+            Style::default().fg(Color::DarkGray),
+        )),
         EnrichStatus::Ready(e) => {
             if e.checks.failing > 0 {
                 spans.push(Span::styled(
@@ -195,7 +208,8 @@ fn pr_row_spans(pr: &DashboardPr, is_selected: bool, launch_repo: &Option<(Strin
                     Style::default().fg(Color::Yellow),
                 ));
             }
-            if pr_search::categorize(pr) == Category::WaitingForReview && e.review_requests.is_empty()
+            if pr_search::categorize(pr) == Category::WaitingForReview
+                && e.review_requests.is_empty()
             {
                 spans.push(Span::styled(
                     " no reviewers",
@@ -361,8 +375,9 @@ fn render_confirm_merge<'a>(pr: &DashboardPr, method: MergeMethod) -> Paragraph<
             Some("Status not loaded yet — consider refreshing (ctrl+r) first.".to_string())
         }
         EnrichStatus::Failed => Some("Status unavailable — merge state unknown.".to_string()),
-        EnrichStatus::Ready(e) => pr_search::merge_blocker_label(e.merge_state)
-            .map(|label| format!("Heads up: {label}.")),
+        EnrichStatus::Ready(e) => {
+            pr_search::merge_blocker_label(e.merge_state).map(|label| format!("Heads up: {label}."))
+        }
     };
     if let Some(caveat) = caveat {
         lines.push(Line::from(Span::styled(
@@ -375,7 +390,11 @@ fn render_confirm_merge<'a>(pr: &DashboardPr, method: MergeMethod) -> Paragraph<
     lines.push(Line::from("Press enter/y to merge, esc/n to cancel."));
 
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Confirm Merge "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Confirm Merge "),
+        )
         .wrap(Wrap { trim: false })
 }
 
@@ -383,7 +402,9 @@ fn render_reviewers<'a>(state: &ReviewerState) -> Paragraph<'a> {
     let mut lines: Vec<Line> = Vec::new();
     match state {
         ReviewerState::Loading { label } => {
-            lines.push(Line::from(format!("Computing reviewer suggestions for {label}…")));
+            lines.push(Line::from(format!(
+                "Computing reviewer suggestions for {label}…"
+            )));
         }
         ReviewerState::Done(ReviewerOutcome::Error(msg)) => {
             lines.push(Line::from(Span::styled(
@@ -405,7 +426,11 @@ fn render_reviewers<'a>(state: &ReviewerState) -> Paragraph<'a> {
     lines.push(Line::from("Press esc to close."));
 
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Suggested reviewers "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Suggested reviewers "),
+        )
         .wrap(Wrap { trim: false })
 }
 
@@ -475,7 +500,11 @@ fn render_help_modal<'a>() -> Paragraph<'a> {
         Line::from("Press esc or ? to close this help."),
     ];
     Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title(" PR Dashboard Help "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" PR Dashboard Help "),
+        )
         .wrap(Wrap { trim: false })
 }
 
@@ -517,7 +546,10 @@ fn compute_reviewers(
     let rec = reviewers::recommend_from_footprint(owner, repo, &footprint);
 
     let thin = rec.confidence == Confidence::Thin;
-    if thin && ai_fallback && let Some(a) = agent {
+    if thin
+        && ai_fallback
+        && let Some(a) = agent
+    {
         let prompt = build_reviewer_prompt(owner, repo, number, &footprint.files);
         if let Ok(text) = ai::run_capturing(&a, model, &prompt, None) {
             return ReviewerOutcome::Ai {
@@ -651,7 +683,11 @@ pub fn run(
             .draw(|f| {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(0),
+                        Constraint::Length(3),
+                    ])
                     .split(f.area());
 
                 let middle = Layout::default()
@@ -690,7 +726,14 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                             f.render_widget(p, middle[0]);
                         } else {
                             f.render_widget(
-                                render_list(&display, selected, scroll, height, &launch_repo, title.clone()),
+                                render_list(
+                                    &display,
+                                    selected,
+                                    scroll,
+                                    height,
+                                    &launch_repo,
+                                    title.clone(),
+                                ),
                                 middle[0],
                             );
                         }
@@ -789,11 +832,9 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                                     Ok(()) => {
                                         // Re-enrich so the PR leaves Drafts into its
                                         // real review bucket instead of Unknown.
-                                        let fresh = pr_search::enrich_one(
-                                            &pr.owner, &pr.repo, pr.number,
-                                        );
-                                        if let Some(p) =
-                                            prs.iter_mut().find(|p| p.id() == pr.id())
+                                        let fresh =
+                                            pr_search::enrich_one(&pr.owner, &pr.repo, pr.number);
+                                        if let Some(p) = prs.iter_mut().find(|p| p.id() == pr.id())
                                         {
                                             p.is_draft = false;
                                             if let Ok(e) = fresh {
@@ -884,13 +925,15 @@ authenticated ('gh auth login'). Press r to retry or esc to quit."
                 | (KeyCode::Char('n'), _)
                 | (KeyCode::Char('c'), KeyModifiers::CONTROL) => mode = Mode::List,
                 (KeyCode::Enter, _) | (KeyCode::Char('y'), _) => {
-                    status = Some(match pr_actions::merge(&pr.owner, &pr.repo, pr.number, method) {
-                        Ok(()) => {
-                            prs.retain(|p| p.id() != pr.id());
-                            format!("Merged #{}", pr.number)
-                        }
-                        Err(e) => format!("Merge failed: {e}"),
-                    });
+                    status = Some(
+                        match pr_actions::merge(&pr.owner, &pr.repo, pr.number, method) {
+                            Ok(()) => {
+                                prs.retain(|p| p.id() != pr.id());
+                                format!("Merged #{}", pr.number)
+                            }
+                            Err(e) => format!("Merge failed: {e}"),
+                        },
+                    );
                     mode = Mode::List;
                 }
                 _ => {}
@@ -991,8 +1034,14 @@ mod tests {
     #[test]
     fn test_is_local() {
         let p = pr(1, "dash0hq", "dash0", Relation::Authored, false);
-        assert!(is_local(&p, &Some(("dash0hq".to_string(), "dash0".to_string()))));
-        assert!(!is_local(&p, &Some(("dash0hq".to_string(), "other".to_string()))));
+        assert!(is_local(
+            &p,
+            &Some(("dash0hq".to_string(), "dash0".to_string()))
+        ));
+        assert!(!is_local(
+            &p,
+            &Some(("dash0hq".to_string(), "other".to_string()))
+        ));
         assert!(!is_local(&p, &None));
     }
 }

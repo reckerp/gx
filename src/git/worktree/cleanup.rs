@@ -31,7 +31,9 @@ pub fn unpushed_count(branch: &str) -> Result<Option<usize>, GitError> {
 /// upstream is *not* reported as unpushed here; callers that need to treat a
 /// missing upstream as unsafe should consult [`has_upstream`] separately.
 pub fn has_unpushed(branch: &str) -> Result<bool, GitError> {
-    Ok(unpushed_count(branch)?.map(|ahead| ahead > 0).unwrap_or(false))
+    Ok(unpushed_count(branch)?
+        .map(|ahead| ahead > 0)
+        .unwrap_or(false))
 }
 
 /// Committer epoch seconds of the tip commit of `branch`.
@@ -231,12 +233,16 @@ mod tests {
         let mut orphans = branches_without_worktree(&all_local, &worktrees);
         orphans.sort();
 
-        assert_eq!(orphans, vec!["experiment".to_string(), "old-fix".to_string()]);
+        assert_eq!(
+            orphans,
+            vec!["experiment".to_string(), "old-fix".to_string()]
+        );
     }
 
     #[test]
     fn test_parse_gone_branches() {
-        let output = "main [ahead 1]\nfeat/x [gone]\nrelease \nold-thing [gone]\nahead-only [behind 2]";
+        let output =
+            "main [ahead 1]\nfeat/x [gone]\nrelease \nold-thing [gone]\nahead-only [behind 2]";
         let gone = parse_gone_branches(output);
         assert_eq!(gone, vec!["feat/x".to_string(), "old-thing".to_string()]);
     }

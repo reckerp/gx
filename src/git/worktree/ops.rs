@@ -107,7 +107,10 @@ pub fn ref_resolvable(base: &str) -> Result<bool, GitError> {
         // rev-parse --verify --quiet exits non-zero with no stderr when the ref
         // is unknown; treat that (non-zero exit + empty stderr) as "not
         // resolvable" rather than a hard error.
-        Err(GitError::CommandFailed { stderr, code: Some(_) }) if stderr.is_empty() => Ok(false),
+        Err(GitError::CommandFailed {
+            stderr,
+            code: Some(_),
+        }) if stderr.is_empty() => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -146,9 +149,7 @@ fn find_ref_conflict(wanted: &str, existing: &[String]) -> Option<String> {
 /// True when `prefix` is a strict slash-delimited path prefix of `name`
 /// (e.g. "foo" is a prefix of "foo/bar", but not of "foobar" or "foo").
 fn is_path_prefix(prefix: &str, name: &str) -> bool {
-    name.len() > prefix.len()
-        && name.starts_with(prefix)
-        && name.as_bytes()[prefix.len()] == b'/'
+    name.len() > prefix.len() && name.starts_with(prefix) && name.as_bytes()[prefix.len()] == b'/'
 }
 
 /// Rebase the branch checked out in the worktree at `path` onto `base`
@@ -200,7 +201,10 @@ pub fn delete_branch(from: &Path, branch_name: &str, force: bool) -> Result<(), 
 /// worktree) and prefers `git worktree move` over a manual filesystem move so
 /// Git's administrative files (`.git` pointer, gitdir link) stay consistent.
 pub fn move_worktree(from: &Path, path: &Path, new_path: &Path) -> Result<(), GitError> {
-    git_exec::exec(move_worktree_args(from, path, new_path), ExecOptions::silent())?;
+    git_exec::exec(
+        move_worktree_args(from, path, new_path),
+        ExecOptions::silent(),
+    )?;
     Ok(())
 }
 
@@ -302,9 +306,15 @@ mod tests {
         let existing = vec!["foo".to_string(), "feat/a".to_string(), "main".to_string()];
 
         // existing 'foo' (a file) blocks creating 'foo/bar' (a directory)
-        assert_eq!(find_ref_conflict("foo/bar", &existing), Some("foo".to_string()));
+        assert_eq!(
+            find_ref_conflict("foo/bar", &existing),
+            Some("foo".to_string())
+        );
         // existing 'feat/a' (a directory) blocks creating 'feat' (a file)
-        assert_eq!(find_ref_conflict("feat", &existing), Some("feat/a".to_string()));
+        assert_eq!(
+            find_ref_conflict("feat", &existing),
+            Some("feat/a".to_string())
+        );
 
         // exact matches are not conflicts (handled as "already exists")
         assert_eq!(find_ref_conflict("foo", &existing), None);

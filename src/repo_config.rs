@@ -328,7 +328,10 @@ pub struct HookVars {
 /// `String::replace`, matching the codebase's `{repo}` substitution style.
 pub fn expand_hook(template: &str, vars: &HookVars) -> String {
     template
-        .replace("{workspace_path}", &vars.workspace_path.display().to_string())
+        .replace(
+            "{workspace_path}",
+            &vars.workspace_path.display().to_string(),
+        )
         .replace("{workspace}", &vars.workspace)
         .replace("{main_root}", &vars.main_root.display().to_string())
         .replace("{branch}", &vars.branch)
@@ -534,13 +537,7 @@ mod tests {
         let global = config::Config::default();
         let personal = empty_personal(&main_root);
 
-        let policy = resolve(
-            &global,
-            &personal,
-            Some(&shared),
-            Some(&local),
-            &main_root,
-        );
+        let policy = resolve(&global, &personal, Some(&shared), Some(&local), &main_root);
         assert_eq!(policy.update_strategy.as_deref(), Some("merge"));
 
         std::fs::remove_dir_all(&main_root).ok();
@@ -566,13 +563,7 @@ mod tests {
         let global = config::Config::default();
         let personal = empty_personal(&main_root);
 
-        let policy = resolve(
-            &global,
-            &personal,
-            Some(&shared),
-            Some(&local),
-            &main_root,
-        );
+        let policy = resolve(&global, &personal, Some(&shared), Some(&local), &main_root);
         assert_eq!(policy.setup_script.as_deref(), Some(".gx/local.sh"));
         assert_eq!(
             policy.resolved_setup_script(),
@@ -625,13 +616,7 @@ mod tests {
             ..Default::default()
         };
 
-        let policy = resolve(
-            &global,
-            &personal,
-            Some(&shared),
-            Some(&local),
-            &main_root,
-        );
+        let policy = resolve(&global, &personal, Some(&shared), Some(&local), &main_root);
         assert_eq!(
             policy.copy_files,
             vec![
@@ -660,10 +645,7 @@ mod tests {
         let loaded = load_file(&gx.join(SHARED_FILE)).expect("should not error");
         let file = loaded.expect("file exists");
         assert_eq!(file.version, Some(999));
-        assert_eq!(
-            file.workspace.copy_files,
-            Some(vec![".env".to_string()])
-        );
+        assert_eq!(file.workspace.copy_files, Some(vec![".env".to_string()]));
 
         std::fs::remove_dir_all(&root).ok();
     }

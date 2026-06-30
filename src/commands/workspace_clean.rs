@@ -1,11 +1,11 @@
 use crate::commands::workspace::{
     RemoveOutcome, delete_local_branch, main_worktree_root, remove_one_worktree,
 };
-use crate::output;
 use crate::config::{self, Config};
 use crate::git::time::now_secs;
 use crate::git::worktree::{OrphanBranch, Worktree, WorktreeSummary};
 use crate::git::{self, GitError};
+use crate::output;
 use crate::ui;
 use crate::ui::clean_picker::{CleanAction, CleanInputs};
 use miette::{Diagnostic, Result};
@@ -294,7 +294,11 @@ fn run_clean_interactive(cfg: &Config) -> Result<()> {
     let now = now_secs();
     let ages: HashMap<PathBuf, u64> = worktrees
         .iter()
-        .filter_map(|w| git::worktree::workspace_age_days(w, now).ok().map(|d| (w.path.clone(), d)))
+        .filter_map(|w| {
+            git::worktree::workspace_age_days(w, now)
+                .ok()
+                .map(|d| (w.path.clone(), d))
+        })
         .collect();
 
     let inputs = CleanInputs {
@@ -449,7 +453,12 @@ pub fn run_protect(branch: Option<String>) -> Result<()> {
     let branch = resolve_branch_arg(branch)?;
     let mut cfg = config::load()?;
 
-    if cfg.workspace.protected_branches.iter().any(|b| b == &branch) {
+    if cfg
+        .workspace
+        .protected_branches
+        .iter()
+        .any(|b| b == &branch)
+    {
         eprintln!("Branch '{}' is already protected", branch);
         return Ok(());
     }
@@ -540,10 +549,7 @@ fn is_implicitly_protected(branch: &str) -> bool {
     }
 
     git::worktree::list()
-        .map(|wts| {
-            wts.iter()
-                .any(|w| w.branch.as_deref() == Some(branch))
-        })
+        .map(|wts| wts.iter().any(|w| w.branch.as_deref() == Some(branch)))
         .unwrap_or(false)
 }
 

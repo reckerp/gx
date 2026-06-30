@@ -41,12 +41,17 @@ pub fn run() -> Result<()> {
     // Shared+local choices.
     eprintln!();
     eprintln!("Where should this setup be saved?");
-    eprintln!("  - Shared repo config is committable (.gx/workspace.toml) and gives the team a default.");
-    eprintln!("  - Personal config stays on this machine (good for secrets and local-only scripts).");
+    eprintln!(
+        "  - Shared repo config is committable (.gx/workspace.toml) and gives the team a default."
+    );
+    eprintln!(
+        "  - Personal config stays on this machine (good for secrets and local-only scripts)."
+    );
     let shared = ui::confirm::run("Save as shared repo config (.gx/workspace.toml)?")?;
 
     if shared {
-        let with_local = ui::confirm::run("Also create a local override (.gx/workspace.local.toml)?")?;
+        let with_local =
+            ui::confirm::run("Also create a local override (.gx/workspace.local.toml)?")?;
         save_shared(&main_root, profile.config.copy_files.clone(), with_local)
     } else {
         save_personal(profile)

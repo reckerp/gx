@@ -49,34 +49,58 @@ fn enter<W: Write>(mut writer: W, tag: u8) -> io::Result<Terminal<CrosstermBacke
 /// mis-ordered relative to an early `?`/panic — the failure mode the previous
 /// manual setup/restore call pairs risked.
 struct TerminalGuard<W: Write> {
-    terminal: Terminal<CrosstermBackend<W>>,
+    terminal: Option<Terminal<CrosstermBackend<W>>>,
+}
+
+impl<W: Write> TerminalGuard<W> {
+    fn new(terminal: Terminal<CrosstermBackend<W>>) -> Self {
+        Self {
+            terminal: Some(terminal),
+        }
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<W>> {
+        self.terminal
+            .as_mut()
+            .expect("terminal guard missing terminal before restore")
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        let Some(terminal) = self.terminal.as_mut() else {
+            return Ok(());
+        };
+
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, cursor::Show)?;
+        ACTIVE_TTY.store(0, Ordering::SeqCst);
+        self.terminal = None;
+        Ok(())
+    }
 }
 
 impl<W: Write> Drop for TerminalGuard<W> {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, cursor::Show);
-        ACTIVE_TTY.store(0, Ordering::SeqCst);
+        let _ = self.restore();
     }
 }
 
 /// Run `f` with a TUI terminal rendering to stdout, restoring the terminal
 /// before returning no matter how `f` exits. The returned `io::Result` reports
-/// only terminal *setup* failure; `f`'s own value (e.g. a picker's
+/// terminal setup or restore failure; `f`'s own value (e.g. a picker's
 /// `miette::Result`) is returned untouched inside the `Ok`.
 pub fn with_terminal<R>(f: impl FnOnce(&mut Term) -> R) -> io::Result<R> {
-    let mut guard = TerminalGuard {
-        terminal: enter(io::stdout(), 1)?,
-    };
-    Ok(f(&mut guard.terminal))
+    let mut guard = TerminalGuard::new(enter(io::stdout(), 1)?);
+    let result = f(guard.terminal_mut());
+    guard.restore()?;
+    Ok(result)
 }
 
 /// Like [`with_terminal`], but renders to stderr so the TUI's final result can
 /// be printed to stdout and captured by a shell wrapper (e.g.
 /// `cd "$(gx workspace go)"`).
 pub fn with_terminal_stderr<R>(f: impl FnOnce(&mut TermStderr) -> R) -> io::Result<R> {
-    let mut guard = TerminalGuard {
-        terminal: enter(io::stderr(), 2)?,
-    };
-    Ok(f(&mut guard.terminal))
+    let mut guard = TerminalGuard::new(enter(io::stderr(), 2)?);
+    let result = f(guard.terminal_mut());
+    guard.restore()?;
+    Ok(result)
 }

@@ -234,12 +234,12 @@ pub fn suggest(
         .collect();
 
     let distinct_committers = history.keys().filter(|l| !excluded(l)).count();
-    let confidence = if !codeowner_owners.is_empty() || distinct_committers >= THIN_COMMITTER_THRESHOLD
-    {
-        Confidence::Strong
-    } else {
-        Confidence::Thin
-    };
+    let confidence =
+        if !codeowner_owners.is_empty() || distinct_committers >= THIN_COMMITTER_THRESHOLD {
+            Confidence::Strong
+        } else {
+            Confidence::Thin
+        };
 
     Recommendations {
         suggestions,
@@ -361,7 +361,8 @@ fn fetch_commit_authors(owner: &str, repo: &str, path: &str) -> Vec<String> {
         "repos/{owner}/{repo}/commits?path={}&per_page=30",
         urlencode(path)
     );
-    let Ok(stdout) = gh::capture(&["api", &endpoint, "--jq", ".[] | .author.login // empty"]) else {
+    let Ok(stdout) = gh::capture(&["api", &endpoint, "--jq", ".[] | .author.login // empty"])
+    else {
         return Vec::new();
     };
     stdout
@@ -445,7 +446,10 @@ mod tests {
 
     #[test]
     fn test_matches_codeowner() {
-        assert!(matches_codeowner("app/darkplane/**", "app/darkplane/ingest.ts"));
+        assert!(matches_codeowner(
+            "app/darkplane/**",
+            "app/darkplane/ingest.ts"
+        ));
         assert!(matches_codeowner("*.rs", "src/main.rs"));
         assert!(matches_codeowner("*", "anything/at/all.go"));
         assert!(matches_codeowner("/src/", "src/main.rs"));

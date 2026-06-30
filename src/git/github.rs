@@ -6,7 +6,7 @@
 //! belongs to the current repository's `origin` remote; pull requests are then
 //! resolved to their head branch via the `gh` CLI.
 
-use super::{GitError, gh, get_repo};
+use super::{GitError, get_repo, gh};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -231,7 +231,9 @@ fn resolve_pr_branch(owner: &str, repo: &str, number: u64) -> Result<String, Git
     ])
     .map_err(|e| match e {
         gh::GhError::NotFound => GitHubError::GhNotFound,
-        gh::GhError::Failed(detail) => GitHubError::GhFailed(format!("#{number} in '{slug}': {detail}")),
+        gh::GhError::Failed(detail) => {
+            GitHubError::GhFailed(format!("#{number} in '{slug}': {detail}"))
+        }
     })?;
 
     let mut fields = stdout.trim().splitn(2, '\t');

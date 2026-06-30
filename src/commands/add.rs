@@ -1,6 +1,6 @@
 use crate::git;
-use crate::output;
 use crate::git::GitError;
+use crate::output;
 use crate::ui;
 use miette::{Diagnostic, Result};
 use thiserror::Error;
