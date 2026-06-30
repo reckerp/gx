@@ -104,3 +104,23 @@ pub fn with_terminal_stderr<R>(f: impl FnOnce(&mut TermStderr) -> R) -> io::Resu
     guard.restore()?;
     Ok(result)
 }
+
+/// Temporarily leave a stdout TUI — cooked mode, main screen, cursor shown — to
+/// run `f` (e.g. spawning `$EDITOR` with inherited stdio), then re-enter the
+/// alternate screen and force a full redraw. Used by the review comment popup's
+/// `$EDITOR` pop-out. The panic hook still covers an unwinding `f`.
+pub fn suspend<R>(terminal: &mut Term, f: impl FnOnce() -> R) -> io::Result<R> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+    ACTIVE_TTY.store(0, Ordering::SeqCst);
+
+    let result = f();
+
+    // Mark the TTY active *before* re-entering so the panic hook (and the
+    // outer guard) can still restore it if a re-entry step fails or panics.
+    ACTIVE_TTY.store(1, Ordering::SeqCst);
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    Ok(result)
+}

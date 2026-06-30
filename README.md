@@ -68,6 +68,7 @@ gx pr                           # interactive PR dashboard
 | `log` | `l` | View commit history |
 | `workspace` | `ws` | Manage workspaces (git worktrees) |
 | `pr` | `prs`, `pullrequest`, `pullrequests` | Dashboard of your open pull requests |
+| `review` | `rev` | TUI diff reviewer with line comments for a coding agent |
 | `onboarding` | `onboard` | Configure repo-specific setup |
 | `setup` | — | Generate shell aliases, the `cd` wrapper, and completions |
 

@@ -6,6 +6,7 @@ pub mod log;
 pub mod onboarding;
 pub mod pr;
 pub mod push;
+pub mod review;
 pub mod setup;
 pub mod stash;
 pub mod status;
