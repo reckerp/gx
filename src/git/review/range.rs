@@ -17,15 +17,6 @@
 use crate::git::{GitError, branch, get_repo};
 use git2::Oid;
 
-/// Which kind of comparison a review targets. Drives the header label and the
-/// in-TUI range switcher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RangeMode {
-    Branch,
-    Commit,
-    Uncommitted,
-}
-
 /// The "to" side of a review range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endpoint {
@@ -38,7 +29,6 @@ pub enum Endpoint {
 /// A fully resolved review range, ready for the diff builder to consume.
 #[derive(Debug, Clone)]
 pub struct ReviewRange {
-    pub mode: RangeMode,
     /// Commit whose tree is the "old" side. `None` means the empty tree (a root
     /// commit has no parent to diff against).
     pub from: Option<Oid>,
@@ -108,7 +98,6 @@ pub fn resolve_branch(base: Option<String>) -> Result<ReviewRange, GitError> {
     let merge_base = repo.merge_base(base_oid, head_oid)?;
 
     Ok(ReviewRange {
-        mode: RangeMode::Branch,
         from: Some(merge_base),
         to: Endpoint::Commit(head_oid),
         label: format!("{base_ref}...HEAD"),
@@ -125,7 +114,6 @@ pub fn resolve_commit(reference: &str) -> Result<ReviewRange, GitError> {
     let sh = short_oid(&repo, to_oid);
 
     Ok(ReviewRange {
-        mode: RangeMode::Commit,
         from,
         to: Endpoint::Commit(to_oid),
         label: format!("{sh}^..{sh}"),
@@ -140,7 +128,6 @@ pub fn resolve_explicit_range(from_ref: &str, to_ref: &str) -> Result<ReviewRang
     let to_oid = repo.revparse_single(to_ref)?.peel_to_commit()?.id();
 
     Ok(ReviewRange {
-        mode: RangeMode::Commit,
         from: Some(from_oid),
         to: Endpoint::Commit(to_oid),
         label: format!("{from_ref}..{to_ref}"),
@@ -154,7 +141,6 @@ pub fn resolve_uncommitted() -> Result<ReviewRange, GitError> {
     let head_oid = repo.head()?.peel_to_commit()?.id();
 
     Ok(ReviewRange {
-        mode: RangeMode::Uncommitted,
         from: Some(head_oid),
         to: Endpoint::WorkingTree,
         label: "HEAD..<working tree>".to_string(),
@@ -221,7 +207,6 @@ mod tests {
     fn uncommitted_resolves_against_working_tree() {
         // Runs in the repo's own working tree; HEAD always has a commit here.
         let range = resolve_uncommitted().expect("resolve uncommitted");
-        assert_eq!(range.mode, RangeMode::Uncommitted);
         assert_eq!(range.to, Endpoint::WorkingTree);
         assert_eq!(range.scope_id, "worktree");
         assert!(range.from.is_some());

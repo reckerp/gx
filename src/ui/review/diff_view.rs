@@ -262,9 +262,14 @@ pub fn render(
     h_scroll: usize,
     focused: bool,
 ) {
+    let path_label = match &rf.diff.old_path {
+        Some(old) => format!("{old} → {}", rf.diff.path),
+        None => rf.diff.path.clone(),
+    };
     let title = format!(
-        " {} {} ",
-        rf.diff.path,
+        " {} {} {} ",
+        crate::ui::status_char(rf.diff.status),
+        path_label,
         match view {
             ViewMode::SideBySide => "[split]",
             ViewMode::Unified => "[unified]",

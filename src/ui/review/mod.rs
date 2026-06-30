@@ -7,9 +7,9 @@ pub mod diff_view;
 pub mod highlight;
 
 use crate::git::review::blob;
-use crate::git::review::diff::ChangedFile;
-use crate::git::review::range::ReviewRange;
-use crate::git::review::state::{self, Comment, Marks, ReviewState, Side};
+use crate::git::review::diff::{self, ChangedFile};
+use crate::git::review::range::{self, Endpoint, ReviewRange};
+use crate::git::review::state::{self, Comment, ReviewState, Side};
 use crate::ui::terminal::with_terminal;
 use crate::ui::{render_help_bar, status_char, status_color};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -29,6 +29,7 @@ enum Mode {
     VisualSelect,
     CommentPopup,
     OrphanedList,
+    RangeSwitch,
     Help,
 }
 
@@ -228,6 +229,10 @@ impl App {
                 }
                 false
             }
+            Mode::RangeSwitch => {
+                self.handle_rangeswitch_key(key);
+                false
+            }
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -305,6 +310,7 @@ impl App {
                 }
             }
 
+            (KeyCode::Char('s'), _) => self.mode = Mode::RangeSwitch,
             (KeyCode::Char('v'), _) => self.toggle_view(),
             (KeyCode::Char('b'), _) => self.show_sidebar = !self.show_sidebar,
             (KeyCode::Char('?'), _) => self.mode = Mode::Help,
@@ -559,6 +565,61 @@ impl App {
         self.status = Some("Review discarded.".into());
     }
 
+    fn handle_rangeswitch_key(&mut self, key: event::KeyEvent) {
+        let resolved = match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Char('b') => range::resolve_branch(None),
+            KeyCode::Char('u') => range::resolve_uncommitted(),
+            KeyCode::Char('t') => range::resolve_branch(None).map(|mut r| {
+                r.to = Endpoint::WorkingTree;
+                r.label = format!("{} +worktree", r.label);
+                r
+            }),
+            _ => return,
+        };
+        match resolved {
+            Ok(range) => self.switch_range(range),
+            Err(e) => {
+                self.status = Some(format!("Range switch failed: {e}"));
+                self.mode = Mode::Normal;
+            }
+        }
+    }
+
+    /// Re-resolve to `new_range`, rebuild the file list and diffs, and load the
+    /// (separately-keyed) review for the new scope. The current scope's review
+    /// is saved first.
+    fn switch_range(&mut self, new_range: ReviewRange) {
+        if let Some(key) = &self.key {
+            let _ = state::save(key, &self.review);
+        }
+        match diff::changed_files(&new_range) {
+            Ok(files) => {
+                self.cache = (0..files.len()).map(|_| None).collect();
+                self.files = files;
+                self.range = new_range;
+                self.selected = 0;
+                self.cursor = 0;
+                self.v_scroll = 0;
+                self.h_scroll = 0;
+                self.view_override = None;
+                self.key = crate::git::worktree::common_git_dir()
+                    .ok()
+                    .map(|d| state::storage_key(&d, &self.range.scope_id));
+                self.review = self.key.as_deref().map(state::load).unwrap_or_default();
+                self.status = Some(format!("Switched to {}", self.range.label));
+                self.mode = Mode::Normal;
+            }
+            Err(e) => {
+                self.status = Some(format!("Range switch failed: {e}"));
+                self.mode = Mode::Normal;
+            }
+        }
+    }
+
     // --- rendering --------------------------------------------------------
 
     fn draw(&mut self, f: &mut Frame) {
@@ -612,8 +673,33 @@ impl App {
             Mode::Help => self.draw_help_overlay(f, area),
             Mode::CommentPopup => self.draw_popup(f, area),
             Mode::OrphanedList => self.draw_orphans(f, area),
+            Mode::RangeSwitch => self.draw_rangeswitch(f, area),
             _ => {}
         }
+    }
+
+    fn draw_rangeswitch(&self, f: &mut Frame, area: Rect) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "Switch range",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::raw("b   branch vs base (committed)"),
+            Line::raw("t   branch vs base + working tree"),
+            Line::raw("u   uncommitted (working tree vs HEAD)"),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let popup = centered_rect(50, 45, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Range — now: {} ", self.range.label));
+        f.render_widget(Paragraph::new(lines).block(block), popup);
     }
 
     fn draw_orphans(&self, f: &mut Frame, area: Rect) {
@@ -732,6 +818,7 @@ impl App {
                 ("D", "del"),
                 ("]c", "hunk"),
                 ("Tab", "file"),
+                ("s", "range"),
                 ("v", "view"),
                 ("F", "finish"),
                 ("X", "reset"),
@@ -746,6 +833,7 @@ impl App {
                 ("esc", "cancel"),
             ],
             Mode::OrphanedList => &[("esc", "close")],
+            Mode::RangeSwitch => &[("b/t/u", "pick"), ("esc", "cancel")],
             Mode::Help => &[("esc", "close")],
         };
         render_help_bar(hints)
@@ -803,6 +891,7 @@ impl App {
             Line::raw("g / G          top / bottom"),
             Line::raw("]c / [c        next / prev hunk  (also } / {)"),
             Line::raw("Tab / S-Tab    next / prev file"),
+            Line::raw("s              switch range (branch / +worktree / uncommitted)"),
             Line::raw("h / l  ← →     scroll horizontally"),
             Line::raw("c              comment on the current line"),
             Line::raw("V              start a multi-line selection, then c"),
