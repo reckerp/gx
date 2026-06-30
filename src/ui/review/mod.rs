@@ -103,27 +103,39 @@ fn run_loop(
     appearance: Appearance,
 ) -> Result<Option<String>> {
     let mut app = App::new(range, files, theme, min_width, appearance);
+    let mut needs_redraw = true;
 
     loop {
-        if let Err(e) = app.ensure_current_built() {
-            // Don't lose the in-progress review if building a file diff fails.
-            if let Some(key) = &app.key {
-                let _ = state::save(key, &app.review);
+        if needs_redraw {
+            if let Err(e) = app.ensure_current_built() {
+                // Don't lose the in-progress review if building a file diff fails.
+                if let Some(key) = &app.key {
+                    let _ = state::save(key, &app.review);
+                }
+                return Err(e);
             }
-            return Err(e);
+            terminal.draw(|f| app.draw(f)).into_diagnostic()?;
+            needs_redraw = false;
         }
-        terminal.draw(|f| app.draw(f)).into_diagnostic()?;
 
-        if event::poll(Duration::from_millis(100)).into_diagnostic()?
-            && let Event::Key(key) = event::read().into_diagnostic()?
-        {
-            if app.handle_key(key) {
-                break;
-            }
-            // The popup requests an $EDITOR pop-out; the loop owns the terminal
-            // so it (not the App) drives the suspend/resume.
-            if std::mem::take(&mut app.editor_request) {
-                app.run_editor(terminal);
+        // Block on input (bounded) and only re-render when something actually
+        // happened — no busy redraw (and per-frame model/tree/marks rebuild)
+        // while idle.
+        if event::poll(Duration::from_millis(250)).into_diagnostic()? {
+            match event::read().into_diagnostic()? {
+                Event::Key(key) => {
+                    if app.handle_key(key) {
+                        break;
+                    }
+                    // The popup requests an $EDITOR pop-out; the loop owns the
+                    // terminal so it (not the App) drives the suspend/resume.
+                    if std::mem::take(&mut app.editor_request) {
+                        app.run_editor(terminal);
+                    }
+                    needs_redraw = true;
+                }
+                Event::Resize(_, _) => needs_redraw = true,
+                _ => {}
             }
         }
     }
