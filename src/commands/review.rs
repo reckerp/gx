@@ -11,10 +11,24 @@ pub fn run(target: Option<String>, base: Option<String>) -> Result<()> {
     let files = diff::changed_files(&range)?;
     let cfg = config::load()?;
 
+    // Detect the terminal appearance before the TUI takes over the terminal, and
+    // pick a matching syntect theme when none is configured.
+    let appearance = ui::review::detect_appearance(&cfg.review.appearance);
+    let theme = if cfg.review.theme.is_empty() {
+        match appearance {
+            ui::review::Appearance::Light => "InspiredGitHub",
+            ui::review::Appearance::Dark => "base16-ocean.dark",
+        }
+        .to_string()
+    } else {
+        cfg.review.theme.clone()
+    };
+
     ui::review::run(
         range,
         files,
-        &cfg.review.theme,
+        &theme,
         cfg.review.side_by_side_min_width,
+        appearance,
     )
 }

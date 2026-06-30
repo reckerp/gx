@@ -24,7 +24,27 @@ use ratatui::widgets::*;
 use std::time::Duration;
 
 const SIDEBAR_WIDTH: u16 = 32;
-const SELECT_BG: Color = Color::Rgb(50, 50, 70);
+
+/// Resolved terminal appearance, driving the syntax theme and diff palette.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    Dark,
+    Light,
+}
+
+/// Resolve the configured appearance. "auto" queries the terminal background
+/// (OSC 11, via terminal-light); a detection failure defaults to dark, matching
+/// the prior behavior for dark terminals and piped output.
+pub fn detect_appearance(pref: &str) -> Appearance {
+    match pref {
+        "light" => Appearance::Light,
+        "dark" => Appearance::Dark,
+        _ => match terminal_light::luma() {
+            Ok(luma) if luma > 0.5 => Appearance::Light,
+            _ => Appearance::Dark,
+        },
+    }
+}
 
 enum Mode {
     Normal,
@@ -55,12 +75,19 @@ struct Popup {
 }
 
 /// Launch the review TUI for an already-resolved range and changed-file list.
-pub fn run(range: ReviewRange, files: Vec<ChangedFile>, theme: &str, min_width: u16) -> Result<()> {
+pub fn run(
+    range: ReviewRange,
+    files: Vec<ChangedFile>,
+    theme: &str,
+    min_width: u16,
+    appearance: Appearance,
+) -> Result<()> {
     // `with_terminal` enters the alternate screen / raw mode and restores it
     // (even on panic, via its guard) before returning; the inner Result carries
     // the loop's outcome plus an optional message to print after teardown.
-    let message = with_terminal(|terminal| run_loop(terminal, range, files, theme, min_width))
-        .into_diagnostic()??;
+    let message =
+        with_terminal(|terminal| run_loop(terminal, range, files, theme, min_width, appearance))
+            .into_diagnostic()??;
     if let Some(msg) = message {
         println!("{msg}");
     }
@@ -73,8 +100,9 @@ fn run_loop(
     files: Vec<ChangedFile>,
     theme: &str,
     min_width: u16,
+    appearance: Appearance,
 ) -> Result<Option<String>> {
-    let mut app = App::new(range, files, theme, min_width);
+    let mut app = App::new(range, files, theme, min_width, appearance);
 
     loop {
         app.ensure_current_built()?;
@@ -115,6 +143,7 @@ struct App {
     h_scroll: usize,
     view_override: Option<ViewMode>,
     min_width: u16,
+    palette: diff_view::Palette,
     show_sidebar: bool,
     mode: Mode,
     focus: Focus,
@@ -131,8 +160,15 @@ struct App {
 }
 
 impl App {
-    fn new(range: ReviewRange, files: Vec<ChangedFile>, theme: &str, min_width: u16) -> Self {
+    fn new(
+        range: ReviewRange,
+        files: Vec<ChangedFile>,
+        theme: &str,
+        min_width: u16,
+        appearance: Appearance,
+    ) -> Self {
         let cache = (0..files.len()).map(|_| None).collect();
+        let palette = diff_view::Palette::for_appearance(appearance);
         // Key persistence on the clone's shared git dir + the range scope, then
         // resume any saved review for this (clone, scope).
         let key = crate::git::worktree::common_git_dir()
@@ -156,6 +192,7 @@ impl App {
             h_scroll: 0,
             view_override: None,
             min_width,
+            palette,
             show_sidebar: true,
             mode: Mode::Normal,
             focus: Focus::Diff,
@@ -816,6 +853,7 @@ impl App {
                 self.v_scroll,
                 self.h_scroll,
                 self.focus == Focus::Diff,
+                self.palette,
             );
         }
 
@@ -944,7 +982,7 @@ impl App {
                         let arrow = if row.collapsed { "▸" } else { "▾" };
                         let mut style = Style::default().fg(Color::Blue);
                         if on_cursor {
-                            style = style.bg(SELECT_BG);
+                            style = style.bg(self.palette.select_bg);
                         }
                         Line::from(Span::styled(format!("{indent}{arrow} {}/", row.name), style))
                     }
@@ -956,7 +994,7 @@ impl App {
                             name_style = name_style.add_modifier(Modifier::BOLD);
                         }
                         if on_cursor {
-                            name_style = name_style.bg(SELECT_BG);
+                            name_style = name_style.bg(self.palette.select_bg);
                         }
                         let mut spans = vec![
                             Span::raw(indent),

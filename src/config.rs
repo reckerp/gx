@@ -107,8 +107,14 @@ impl Default for PrConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewConfig {
-    /// syntect theme name for diff syntax highlighting (e.g. "base16-ocean.dark").
-    #[serde(default = "default_review_theme")]
+    /// Terminal appearance: "auto" detects the terminal background (via OSC 11)
+    /// and picks a light or dark theme + diff palette; "light" / "dark" force it.
+    #[serde(default = "default_appearance")]
+    pub appearance: String,
+
+    /// syntect theme name for diff highlighting. Empty = auto-pick from
+    /// `appearance` (InspiredGitHub for light, base16-ocean.dark for dark).
+    #[serde(default)]
     pub theme: String,
 
     /// Minimum terminal width (columns) for side-by-side; below this the diff
@@ -122,8 +128,8 @@ pub struct ReviewConfig {
     pub default_mode: String,
 }
 
-fn default_review_theme() -> String {
-    "base16-ocean.dark".to_string()
+fn default_appearance() -> String {
+    "auto".to_string()
 }
 
 fn default_side_by_side_min_width() -> u16 {
@@ -137,7 +143,8 @@ fn default_review_mode() -> String {
 impl Default for ReviewConfig {
     fn default() -> Self {
         ReviewConfig {
-            theme: default_review_theme(),
+            appearance: default_appearance(),
+            theme: String::new(),
             side_by_side_min_width: default_side_by_side_min_width(),
             default_mode: default_review_mode(),
         }
@@ -301,10 +308,11 @@ mod tests {
     #[test]
     fn test_default_review_config() {
         let review = ReviewConfig::default();
-        assert_eq!(review.theme, "base16-ocean.dark");
+        assert_eq!(review.appearance, "auto");
+        assert_eq!(review.theme, ""); // empty = auto-pick from appearance
         assert_eq!(review.side_by_side_min_width, 120);
         assert_eq!(review.default_mode, "branch");
-        assert_eq!(Config::default().review.theme, "base16-ocean.dark");
+        assert_eq!(Config::default().review.appearance, "auto");
         assert_eq!(
             Config::default().aliases.get("grev").map(String::as_str),
             Some("review")

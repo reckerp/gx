@@ -82,6 +82,12 @@ Under `[review]` in the gx config (`gx setup` shows the path):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `theme` | `base16-ocean.dark` | syntect theme for highlighting |
+| `appearance` | `auto` | `auto` detects the terminal background (light/dark) and picks a matching theme + diff palette; `light` / `dark` force it |
+| `theme` | *(auto)* | syntect theme name; empty picks `InspiredGitHub` (light) or `base16-ocean.dark` (dark) from `appearance` |
 | `side_by_side_min_width` | `120` | below this terminal width, use the unified view |
 | `default_mode` | `branch` | default range mode |
+
+The diff adapts to your terminal: on a light background it uses a light syntax
+theme with pale add/remove tints; on a dark background, a dark theme with the
+darker tints. If auto-detection guesses wrong (some terminals don't answer the
+query), set `appearance` explicitly.

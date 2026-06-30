@@ -25,6 +25,9 @@ similar = { version = "3.1", features = ["inline"] }
 # default-features off + default-fancy => pure-Rust fancy-regex backend (no onig
 # C dependency), keeping `cargo install`/Homebrew builds toolchain-free.
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+# Detects the terminal's background brightness (via OSC 11) so the diff view can
+# pick a light or dark theme + palette. Uses our crossterm 0.29 (no duplicate).
+terminal-light = "1.8"
 
 [dev-dependencies]
 tempfile = "3"

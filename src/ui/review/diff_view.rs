@@ -18,15 +18,61 @@ use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
+use super::Appearance;
 use super::highlight::{Highlighter, Segment};
 
-const ADD_BG: Color = Color::Rgb(22, 43, 28);
-const ADD_EMPH_BG: Color = Color::Rgb(36, 84, 46);
-const DEL_BG: Color = Color::Rgb(58, 28, 32);
-const DEL_EMPH_BG: Color = Color::Rgb(102, 44, 50);
-const CURSOR_BG: Color = Color::Rgb(50, 50, 70);
-const GUTTER_FG: Color = Color::Rgb(120, 120, 135);
-const HEADER_FG: Color = Color::Cyan;
+/// Colors for the diff view, chosen for the terminal's light or dark
+/// background. Context lines use `Color::Reset` (the terminal's own background)
+/// so they read correctly either way.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub add_bg: Color,
+    pub add_emph_bg: Color,
+    pub del_bg: Color,
+    pub del_emph_bg: Color,
+    pub cursor_bg: Color,
+    pub select_bg: Color,
+    pub empty_bg: Color,
+    pub gutter_fg: Color,
+    pub header_fg: Color,
+}
+
+impl Palette {
+    pub fn for_appearance(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Dark => Palette::dark(),
+            Appearance::Light => Palette::light(),
+        }
+    }
+
+    fn dark() -> Self {
+        Palette {
+            add_bg: Color::Rgb(22, 43, 28),
+            add_emph_bg: Color::Rgb(36, 84, 46),
+            del_bg: Color::Rgb(58, 28, 32),
+            del_emph_bg: Color::Rgb(102, 44, 50),
+            cursor_bg: Color::Rgb(50, 50, 70),
+            select_bg: Color::Rgb(50, 50, 70),
+            empty_bg: Color::Rgb(30, 30, 34),
+            gutter_fg: Color::Rgb(120, 120, 135),
+            header_fg: Color::Cyan,
+        }
+    }
+
+    fn light() -> Self {
+        Palette {
+            add_bg: Color::Rgb(216, 245, 220),
+            add_emph_bg: Color::Rgb(150, 222, 162),
+            del_bg: Color::Rgb(250, 215, 215),
+            del_emph_bg: Color::Rgb(245, 168, 174),
+            cursor_bg: Color::Rgb(206, 215, 242),
+            select_bg: Color::Rgb(206, 215, 242),
+            empty_bg: Color::Rgb(236, 236, 238),
+            gutter_fg: Color::Rgb(120, 120, 130),
+            header_fg: Color::Rgb(0, 92, 130),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewMode {
@@ -261,6 +307,7 @@ pub fn render(
     v_scroll: usize,
     h_scroll: usize,
     focused: bool,
+    palette: Palette,
 ) {
     let path_label = match &rf.diff.old_path {
         Some(old) => format!("{old} → {}", rf.diff.path),
@@ -306,6 +353,7 @@ pub fn render(
                         width,
                         h_scroll,
                         focused && i == cursor,
+                        palette,
                     )
                 })
                 .collect()
@@ -322,6 +370,7 @@ pub fn render(
                         width,
                         h_scroll,
                         focused && i == cursor,
+                        palette,
                     )
                 })
                 .collect()
@@ -356,6 +405,7 @@ fn gutter_width(diff: &FileDiff) -> usize {
     max.to_string().len().max(3)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn side_line_to_line<'a>(
     line: &SideLine<'a>,
     rf: &'a RenderedFile,
@@ -364,13 +414,14 @@ fn side_line_to_line<'a>(
     width: usize,
     h_scroll: usize,
     cursor: bool,
+    pal: Palette,
 ) -> Line<'a> {
     // First column is a 1-cell comment marker; the rest is the body.
     let body_width = width.saturating_sub(1);
     match line {
         SideLine::Header(h) => {
-            let mut spans = vec![marker_span(false, cursor)];
-            spans.extend(header_spans(h, body_width, cursor));
+            let mut spans = vec![marker_span(false, cursor, pal)];
+            spans.extend(header_spans(h, body_width, cursor, pal));
             Line::from(spans)
         }
         SideLine::Pair { left, right } => {
@@ -378,7 +429,7 @@ fn side_line_to_line<'a>(
             let half = body_width.saturating_sub(sep_cols) / 2;
             let text_w = half.saturating_sub(gw + 1);
 
-            let mut spans = vec![marker_span(pair_marked(*left, *right, marks), cursor)];
+            let mut spans = vec![marker_span(pair_marked(*left, *right, marks), cursor, pal)];
             spans.extend(cell(
                 *left,
                 segs(&rf.old_hl, left.and_then(|r| r.old_no)),
@@ -387,10 +438,11 @@ fn side_line_to_line<'a>(
                 text_w,
                 h_scroll,
                 cursor,
+                pal,
             ));
             spans.push(Span::styled(
                 " │ ",
-                Style::default().fg(Color::DarkGray).bg(sep_bg(cursor)),
+                Style::default().fg(Color::DarkGray).bg(sep_bg(cursor, pal)),
             ));
             spans.extend(cell(
                 *right,
@@ -400,12 +452,14 @@ fn side_line_to_line<'a>(
                 text_w,
                 h_scroll,
                 cursor,
+                pal,
             ));
             Line::from(spans)
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn uni_line_to_line<'a>(
     line: &UniLine<'a>,
     rf: &'a RenderedFile,
@@ -414,12 +468,13 @@ fn uni_line_to_line<'a>(
     width: usize,
     h_scroll: usize,
     cursor: bool,
+    pal: Palette,
 ) -> Line<'a> {
     let body_width = width.saturating_sub(1);
     match line {
         UniLine::Header(h) => {
-            let mut spans = vec![marker_span(false, cursor)];
-            spans.extend(header_spans(h, body_width, cursor));
+            let mut spans = vec![marker_span(false, cursor, pal)];
+            spans.extend(header_spans(h, body_width, cursor, pal));
             Line::from(spans)
         }
         UniLine::Row(row) => {
@@ -428,7 +483,7 @@ fn uni_line_to_line<'a>(
                 RowKind::Removed => "-",
                 RowKind::Context => " ",
             };
-            let bg = row_bg(row.kind, cursor);
+            let bg = row_bg(row.kind, cursor, pal);
             let text_w = body_width.saturating_sub(gw * 2 + 4);
             let segments = match row.kind {
                 RowKind::Removed => segs(&rf.old_hl, row.old_no),
@@ -436,11 +491,11 @@ fn uni_line_to_line<'a>(
             };
 
             let mut spans = vec![
-                marker_span(uni_marked(row, marks), cursor),
-                num_span(row.old_no, gw, bg),
+                marker_span(uni_marked(row, marks), cursor, pal),
+                num_span(row.old_no, gw, bg, pal),
                 Span::styled(" ", Style::default().bg(bg)),
-                num_span(row.new_no, gw, bg),
-                Span::styled(format!(" {sign} "), marker_style(row.kind, cursor)),
+                num_span(row.new_no, gw, bg, pal),
+                Span::styled(format!(" {sign} "), marker_style(row.kind, cursor, pal)),
             ];
             spans.extend(text_spans(
                 &row.text,
@@ -450,6 +505,7 @@ fn uni_line_to_line<'a>(
                 cursor,
                 h_scroll,
                 text_w,
+                pal,
             ));
             Line::from(spans)
         }
@@ -463,6 +519,7 @@ enum Col {
 
 /// One half of a side-by-side line: gutter + the line's styled text (or blank
 /// when this side has no corresponding line).
+#[allow(clippy::too_many_arguments)]
 fn cell<'a>(
     row: Option<&'a Row>,
     segments: &'a [Segment],
@@ -471,10 +528,11 @@ fn cell<'a>(
     text_w: usize,
     h_scroll: usize,
     cursor: bool,
+    pal: Palette,
 ) -> Vec<Span<'a>> {
     let Some(row) = row else {
         // No line on this side: blank gutter + filler at the empty-side bg.
-        let bg = if cursor { CURSOR_BG } else { Color::Rgb(30, 30, 34) };
+        let bg = if cursor { pal.cursor_bg } else { pal.empty_bg };
         return vec![
             Span::styled(" ".repeat(gw + 1), Style::default().bg(bg)),
             Span::styled(" ".repeat(text_w), Style::default().bg(bg)),
@@ -484,9 +542,9 @@ fn cell<'a>(
         Col::Old => row.old_no,
         Col::New => row.new_no,
     };
-    let bg = row_bg(row.kind, cursor);
+    let bg = row_bg(row.kind, cursor, pal);
     let mut spans = vec![
-        num_span(num, gw, bg),
+        num_span(num, gw, bg, pal),
         Span::styled(" ", Style::default().bg(bg)),
     ];
     spans.extend(text_spans(
@@ -497,12 +555,13 @@ fn cell<'a>(
         cursor,
         h_scroll,
         text_w,
+        pal,
     ));
     spans
 }
 
-fn header_spans<'a>(header: &str, width: usize, cursor: bool) -> Vec<Span<'a>> {
-    let bg = if cursor { CURSOR_BG } else { Color::Reset };
+fn header_spans<'a>(header: &str, width: usize, cursor: bool, pal: Palette) -> Vec<Span<'a>> {
+    let bg = if cursor { pal.cursor_bg } else { Color::Reset };
     let mut text = header.to_string();
     let count = text.chars().count();
     if count < width {
@@ -511,14 +570,14 @@ fn header_spans<'a>(header: &str, width: usize, cursor: bool) -> Vec<Span<'a>> {
     vec![Span::styled(
         text,
         Style::default()
-            .fg(HEADER_FG)
+            .fg(pal.header_fg)
             .bg(bg)
             .add_modifier(Modifier::BOLD),
     )]
 }
 
-fn marker_span<'a>(marked: bool, cursor: bool) -> Span<'a> {
-    let bg = if cursor { CURSOR_BG } else { Color::Reset };
+fn marker_span<'a>(marked: bool, cursor: bool, pal: Palette) -> Span<'a> {
+    let bg = if cursor { pal.cursor_bg } else { Color::Reset };
     let (ch, fg) = if marked {
         ("●", Color::Magenta)
     } else {
@@ -542,17 +601,18 @@ fn uni_marked(row: &Row, marks: &Marks) -> bool {
         || row.old_no.is_some_and(|n| marks.old.contains(&n))
 }
 
-fn num_span<'a>(num: Option<usize>, gw: usize, bg: Color) -> Span<'a> {
+fn num_span<'a>(num: Option<usize>, gw: usize, bg: Color, pal: Palette) -> Span<'a> {
     let s = match num {
         Some(n) => format!("{n:>gw$}"),
         None => " ".repeat(gw),
     };
-    Span::styled(s, Style::default().fg(GUTTER_FG).bg(bg))
+    Span::styled(s, Style::default().fg(pal.gutter_fg).bg(bg))
 }
 
 /// Build the styled, horizontally-scrolled, width-padded text spans for a line,
 /// layering syntax color, diff background, and word-level emphasis. `text` is
 /// the raw line, used as a fallback when no syntax segments are available.
+#[allow(clippy::too_many_arguments)]
 fn text_spans<'a>(
     text: &str,
     segments: &[Segment],
@@ -561,9 +621,10 @@ fn text_spans<'a>(
     cursor: bool,
     h_scroll: usize,
     width: usize,
+    pal: Palette,
 ) -> Vec<Span<'a>> {
-    let base_bg = row_bg(kind, cursor);
-    let emph_bg = emph_bg(kind, cursor);
+    let base_bg = row_bg(kind, cursor, pal);
+    let emph_bg = emph_bg(kind, cursor, pal);
 
     // Expand to per-character (char, style), tracking byte offset for emphasis.
     let mut chars: Vec<(char, Style)> = Vec::new();
@@ -635,39 +696,39 @@ fn segs(hl: &[Vec<Segment>], line_no: Option<usize>) -> &[Segment] {
         .unwrap_or(&[])
 }
 
-fn row_bg(kind: RowKind, cursor: bool) -> Color {
+fn row_bg(kind: RowKind, cursor: bool, pal: Palette) -> Color {
     if cursor {
-        return CURSOR_BG;
+        return pal.cursor_bg;
     }
     match kind {
-        RowKind::Added => ADD_BG,
-        RowKind::Removed => DEL_BG,
+        RowKind::Added => pal.add_bg,
+        RowKind::Removed => pal.del_bg,
         RowKind::Context => Color::Reset,
     }
 }
 
-fn emph_bg(kind: RowKind, cursor: bool) -> Color {
+fn emph_bg(kind: RowKind, cursor: bool, pal: Palette) -> Color {
     if cursor {
-        return CURSOR_BG;
+        return pal.cursor_bg;
     }
     match kind {
-        RowKind::Added => ADD_EMPH_BG,
-        RowKind::Removed => DEL_EMPH_BG,
+        RowKind::Added => pal.add_emph_bg,
+        RowKind::Removed => pal.del_emph_bg,
         RowKind::Context => Color::Reset,
     }
 }
 
-fn sep_bg(cursor: bool) -> Color {
-    if cursor { CURSOR_BG } else { Color::Reset }
+fn sep_bg(cursor: bool, pal: Palette) -> Color {
+    if cursor { pal.cursor_bg } else { Color::Reset }
 }
 
-fn marker_style(kind: RowKind, cursor: bool) -> Style {
+fn marker_style(kind: RowKind, cursor: bool, pal: Palette) -> Style {
     let fg = match kind {
         RowKind::Added => Color::Green,
         RowKind::Removed => Color::Red,
         RowKind::Context => Color::DarkGray,
     };
-    Style::default().fg(fg).bg(row_bg(kind, cursor))
+    Style::default().fg(fg).bg(row_bg(kind, cursor, pal))
 }
 
 #[cfg(test)]
@@ -788,7 +849,20 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
         terminal
-            .draw(|f| render(f, f.area(), &rf, &Marks::default(), ViewMode::Unified, 0, 0, 0, true))
+            .draw(|f| {
+                render(
+                    f,
+                    f.area(),
+                    &rf,
+                    &Marks::default(),
+                    ViewMode::Unified,
+                    0,
+                    0,
+                    0,
+                    true,
+                    Palette::dark(),
+                )
+            })
             .unwrap();
         let rendered = format!("{}", terminal.backend());
 
@@ -824,6 +898,7 @@ mod tests {
                     0,
                     0,
                     true,
+                    Palette::dark(),
                 )
             })
             .unwrap();
