@@ -4,6 +4,7 @@
 //! as those units land.
 
 pub mod diff_view;
+pub mod file_tree;
 pub mod highlight;
 
 use crate::git::review::blob;
@@ -14,6 +15,7 @@ use crate::ui::terminal::with_terminal;
 use crate::ui::{render_help_bar, status_char, status_color};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use diff_view::{RenderedFile, ViewMode};
+use file_tree::{FileTree, NodeKind};
 use highlight::Highlighter;
 use miette::{IntoDiagnostic, Result};
 use ratatui::Frame;
@@ -30,12 +32,12 @@ enum Mode {
     CommentPopup,
     OrphanedList,
     RangeSwitch,
+    Filter,
     Help,
 }
 
 #[derive(PartialEq)]
 enum Focus {
-    #[allow(dead_code)] // Sidebar focus + j/k routing lands with the file tree (U5).
     Sidebar,
     Diff,
 }
@@ -99,6 +101,9 @@ struct App {
     cache: Vec<Option<RenderedFile>>,
     highlighter: Highlighter,
     review: ReviewState,
+    tree: FileTree,
+    tree_cursor: usize,
+    filter: String,
     cursor: usize,
     v_scroll: usize,
     h_scroll: usize,
@@ -127,6 +132,7 @@ impl App {
             .ok()
             .map(|dir| state::storage_key(&dir, &range.scope_id));
         let review = key.as_deref().map(state::load).unwrap_or_default();
+        let tree = FileTree::new(files.iter().map(|f| (f.path.clone(), f.status)));
 
         App {
             range,
@@ -135,6 +141,9 @@ impl App {
             cache,
             highlighter: Highlighter::new(theme),
             review,
+            tree,
+            tree_cursor: 0,
+            filter: String::new(),
             cursor: 0,
             v_scroll: 0,
             h_scroll: 0,
@@ -233,7 +242,17 @@ impl App {
                 self.handle_rangeswitch_key(key);
                 false
             }
-            Mode::Normal => self.handle_normal_key(key),
+            Mode::Filter => {
+                self.handle_filter_key(key);
+                false
+            }
+            Mode::Normal => {
+                if self.focus == Focus::Sidebar {
+                    self.handle_sidebar_key(key)
+                } else {
+                    self.handle_normal_key(key)
+                }
+            }
         }
     }
 
@@ -276,8 +295,12 @@ impl App {
             (KeyCode::Char('}'), _) => self.jump_hunk(true),
             (KeyCode::Char('{'), _) => self.jump_hunk(false),
 
-            (KeyCode::Tab, _) => self.switch_file(1),
-            (KeyCode::BackTab, _) => self.switch_file(-1),
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+                if self.show_sidebar {
+                    self.sync_tree_cursor_to_selected();
+                    self.focus = Focus::Sidebar;
+                }
+            }
 
             (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
                 self.h_scroll = self.h_scroll.saturating_sub(4)
@@ -312,7 +335,12 @@ impl App {
 
             (KeyCode::Char('s'), _) => self.mode = Mode::RangeSwitch,
             (KeyCode::Char('v'), _) => self.toggle_view(),
-            (KeyCode::Char('b'), _) => self.show_sidebar = !self.show_sidebar,
+            (KeyCode::Char('b'), _) => {
+                self.show_sidebar = !self.show_sidebar;
+                if !self.show_sidebar {
+                    self.focus = Focus::Diff;
+                }
+            }
             (KeyCode::Char('?'), _) => self.mode = Mode::Help,
             _ => {}
         }
@@ -395,15 +423,94 @@ impl App {
         }
     }
 
-    fn switch_file(&mut self, delta: i32) {
-        if self.files.is_empty() {
-            return;
-        }
-        let n = self.files.len() as i32;
-        self.selected = (((self.selected as i32 + delta) % n + n) % n) as usize;
+    /// Open a file in the diff pane and move focus there.
+    fn open_file(&mut self, index: usize) {
+        self.selected = index;
         self.cursor = 0;
         self.v_scroll = 0;
         self.h_scroll = 0;
+        self.focus = Focus::Diff;
+    }
+
+    /// Place the tree cursor on the row of the currently-selected file.
+    fn sync_tree_cursor_to_selected(&mut self) {
+        let rows = self.tree.rows(&self.filter);
+        if let Some(pos) = rows
+            .iter()
+            .position(|r| matches!(r.kind, NodeKind::File { index, .. } if index == self.selected))
+        {
+            self.tree_cursor = pos;
+        }
+    }
+
+    fn clamp_tree_cursor(&mut self) {
+        let len = self.tree.rows(&self.filter).len();
+        if self.tree_cursor >= len {
+            self.tree_cursor = len.saturating_sub(1);
+        }
+    }
+
+    /// Sidebar-focused key handling. Returns true to quit.
+    fn handle_sidebar_key(&mut self, key: event::KeyEvent) -> bool {
+        let rows = self.tree.rows(&self.filter);
+        let len = rows.len();
+
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Esc, _) | (KeyCode::Tab, _) => self.focus = Focus::Diff,
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                if len > 0 {
+                    self.tree_cursor = (self.tree_cursor + 1).min(len - 1);
+                }
+            }
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                self.tree_cursor = self.tree_cursor.saturating_sub(1);
+            }
+            (KeyCode::Char('g'), _) => self.tree_cursor = 0,
+            (KeyCode::Char('G'), _) => self.tree_cursor = len.saturating_sub(1),
+            (KeyCode::Enter, _) | (KeyCode::Char('l'), _) | (KeyCode::Char(' '), _) => {
+                if let Some(row) = rows.get(self.tree_cursor) {
+                    match &row.kind {
+                        NodeKind::Dir => self.tree.toggle(&row.path),
+                        NodeKind::File { index, .. } => self.open_file(*index),
+                    }
+                }
+            }
+            (KeyCode::Char('h'), _) => {
+                if let Some(row) = rows.get(self.tree_cursor) {
+                    match &row.kind {
+                        NodeKind::Dir => self.tree.collapse(&row.path),
+                        NodeKind::File { .. } => {
+                            if let Some((parent, _)) = row.path.rsplit_once('/') {
+                                self.tree.collapse(parent);
+                            }
+                        }
+                    }
+                }
+            }
+            (KeyCode::Char('/'), _) => self.mode = Mode::Filter,
+            (KeyCode::Char('?'), _) => self.mode = Mode::Help,
+            _ => {}
+        }
+        self.clamp_tree_cursor();
+        false
+    }
+
+    fn handle_filter_key(&mut self, key: event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.filter.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Backspace => {
+                self.filter.pop();
+            }
+            KeyCode::Char(c) => self.filter.push(c),
+            _ => {}
+        }
+        self.focus = Focus::Sidebar;
+        self.clamp_tree_cursor();
     }
 
     fn toggle_view(&mut self) {
@@ -752,49 +859,75 @@ impl App {
 
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let total = self.review.total();
-        let title = if total > 0 {
-            format!(" Files ({}) · {} 💬 ", self.files.len(), total)
+        let title = if matches!(self.mode, Mode::Filter) || !self.filter.is_empty() {
+            format!(" Files · /{} ", self.filter)
+        } else if total > 0 {
+            format!(" Files ({}) · {total}c ", self.files.len())
         } else {
             format!(" Files ({}) ", self.files.len())
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let border_style = if self.focus == Focus::Sidebar {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        let rows = self.tree.rows(&self.filter);
         let h = inner.height as usize;
-        let start = if self.selected >= h {
-            self.selected - h + 1
+        let start = if self.tree_cursor >= h {
+            self.tree_cursor - h + 1
         } else {
             0
         };
 
-        let lines: Vec<Line> = self
-            .files
+        let lines: Vec<Line> = rows
             .iter()
             .enumerate()
             .skip(start)
             .take(h)
-            .map(|(i, file)| {
-                let icon = status_char(file.status);
-                let color = status_color(file.status);
-                let name = file.path.rsplit('/').next().unwrap_or(&file.path);
-                let name_style = if i == self.selected {
-                    Style::default().bg(SELECT_BG).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                let mut spans = vec![
-                    Span::styled(format!("{icon} "), Style::default().fg(color)),
-                    Span::styled(name.to_string(), name_style),
-                ];
-                let count = self.review.count_for_file(&file.path);
-                if count > 0 {
-                    spans.push(Span::styled(
-                        format!(" ({count})"),
-                        Style::default().fg(Color::Magenta),
-                    ));
+            .map(|(i, row)| {
+                let indent = "  ".repeat(row.depth);
+                let on_cursor = self.focus == Focus::Sidebar && i == self.tree_cursor;
+                match &row.kind {
+                    NodeKind::Dir => {
+                        let arrow = if row.collapsed { "▸" } else { "▾" };
+                        let mut style = Style::default().fg(Color::Blue);
+                        if on_cursor {
+                            style = style.bg(SELECT_BG);
+                        }
+                        Line::from(Span::styled(format!("{indent}{arrow} {}/", row.name), style))
+                    }
+                    NodeKind::File { index, status } => {
+                        let icon = status_char(*status);
+                        let color = status_color(*status);
+                        let mut name_style = Style::default();
+                        if *index == self.selected {
+                            name_style = name_style.add_modifier(Modifier::BOLD);
+                        }
+                        if on_cursor {
+                            name_style = name_style.bg(SELECT_BG);
+                        }
+                        let mut spans = vec![
+                            Span::raw(indent),
+                            Span::styled(format!("{icon} "), Style::default().fg(color)),
+                            Span::styled(row.name.clone(), name_style),
+                        ];
+                        let count = self.review.count_for_file(&row.path);
+                        if count > 0 {
+                            spans.push(Span::styled(
+                                format!(" ({count})"),
+                                Style::default().fg(Color::Magenta),
+                            ));
+                        }
+                        Line::from(spans)
+                    }
                 }
-                Line::from(spans)
             })
             .collect();
 
@@ -808,6 +941,16 @@ impl App {
                 Style::default().fg(Color::Yellow),
             )))
             .block(Block::default().borders(Borders::ALL).title(" Status "));
+        }
+        if matches!(self.mode, Mode::Normal) && self.focus == Focus::Sidebar {
+            return render_help_bar(&[
+                ("j/k", "move"),
+                ("⏎", "open/toggle"),
+                ("h", "collapse"),
+                ("/", "filter"),
+                ("Tab", "diff"),
+                ("q", "quit"),
+            ]);
         }
         let hints: &[(&str, &str)] = match self.mode {
             Mode::Normal => &[
@@ -834,6 +977,7 @@ impl App {
             ],
             Mode::OrphanedList => &[("esc", "close")],
             Mode::RangeSwitch => &[("b/t/u", "pick"), ("esc", "cancel")],
+            Mode::Filter => &[("type", "filter"), ("⏎", "apply"), ("esc", "clear")],
             Mode::Help => &[("esc", "close")],
         };
         render_help_bar(hints)
@@ -890,7 +1034,7 @@ impl App {
             Line::raw("Ctrl-d / -u    half page down / up"),
             Line::raw("g / G          top / bottom"),
             Line::raw("]c / [c        next / prev hunk  (also } / {)"),
-            Line::raw("Tab / S-Tab    next / prev file"),
+            Line::raw("Tab            focus the file sidebar (j/k move, ⏎ open, / filter)"),
             Line::raw("s              switch range (branch / +worktree / uncommitted)"),
             Line::raw("h / l  ← →     scroll horizontally"),
             Line::raw("c              comment on the current line"),
