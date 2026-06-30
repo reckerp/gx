@@ -77,17 +77,7 @@ impl ChangedFile {
     /// content is read from disk when the blob isn't in the object database).
     pub fn build(&self, to: Endpoint) -> Result<FileDiff, GitError> {
         let repo = get_repo()?;
-        let old_bytes = blob_bytes(&repo, self.old_id);
-        let new_bytes = match to {
-            Endpoint::Commit(_) => blob_bytes(&repo, self.new_id),
-            Endpoint::WorkingTree => {
-                if self.new_id.is_zero() {
-                    read_workdir(&repo, &self.path)
-                } else {
-                    blob_bytes(&repo, self.new_id)
-                }
-            }
-        };
+        let (old_bytes, new_bytes) = self.load_raw(&repo, to);
 
         if looks_binary(&old_bytes) || looks_binary(&new_bytes) {
             return Ok(self.empty_diff(true, false));
@@ -107,6 +97,35 @@ impl ChangedFile {
             too_large: false,
             hunks: build_hunks(&old, &new),
         })
+    }
+
+    /// Load the raw old/new bytes for this file. New content comes from the
+    /// object database for committed ranges, and from the working tree when the
+    /// blob isn't yet hashed (worktree / untracked).
+    fn load_raw(&self, repo: &git2::Repository, to: Endpoint) -> (Vec<u8>, Vec<u8>) {
+        let old = blob_bytes(repo, self.old_id);
+        let new = match to {
+            Endpoint::Commit(_) => blob_bytes(repo, self.new_id),
+            Endpoint::WorkingTree => {
+                if self.new_id.is_zero() {
+                    read_workdir(repo, &self.path)
+                } else {
+                    blob_bytes(repo, self.new_id)
+                }
+            }
+        };
+        (old, new)
+    }
+
+    /// Old and new file contents as lossy UTF-8, for whole-file syntax
+    /// highlighting (the highlighter indexes lines back into the diff's rows).
+    pub fn load_contents(&self, to: Endpoint) -> Result<(String, String), GitError> {
+        let repo = get_repo()?;
+        let (old, new) = self.load_raw(&repo, to);
+        Ok((
+            String::from_utf8_lossy(&old).into_owned(),
+            String::from_utf8_lossy(&new).into_owned(),
+        ))
     }
 
     fn empty_diff(&self, is_binary: bool, too_large: bool) -> FileDiff {
