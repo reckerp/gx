@@ -105,7 +105,13 @@ fn run_loop(
     let mut app = App::new(range, files, theme, min_width, appearance);
 
     loop {
-        app.ensure_current_built()?;
+        if let Err(e) = app.ensure_current_built() {
+            // Don't lose the in-progress review if building a file diff fails.
+            if let Some(key) = &app.key {
+                let _ = state::save(key, &app.review);
+            }
+            return Err(e);
+        }
         terminal.draw(|f| app.draw(f)).into_diagnostic()?;
 
         if event::poll(Duration::from_millis(100)).into_diagnostic()?
@@ -721,16 +727,37 @@ impl App {
             self.status = Some("$EDITOR / $VISUAL not set".into());
             return;
         };
+        // Tokenize so editors carrying flags work (e.g. "code -w", "emacsclient -nw").
+        let mut parts = editor.split_whitespace();
+        let Some(program) = parts.next() else {
+            self.status = Some("$EDITOR is empty".into());
+            return;
+        };
+        let editor_args: Vec<&str> = parts.collect();
 
-        let path =
-            std::env::temp_dir().join(format!("gx-review-comment-{}.md", std::process::id()));
-        if std::fs::write(&path, &buffer).is_err() {
-            self.status = Some("Could not create a temp file for $EDITOR".into());
+        // Exclusive, randomly-named, 0600 temp file — no predictable path to race.
+        let mut tmp = match tempfile::Builder::new()
+            .prefix("gx-review-")
+            .suffix(".md")
+            .tempfile()
+        {
+            Ok(f) => f,
+            Err(_) => {
+                self.status = Some("Could not create a temp file for $EDITOR".into());
+                return;
+            }
+        };
+        if std::io::Write::write_all(tmp.as_file_mut(), buffer.as_bytes()).is_err() {
+            self.status = Some("Could not write the comment draft".into());
             return;
         }
+        let path = tmp.path().to_path_buf();
 
         let outcome = crate::ui::terminal::suspend(terminal, || {
-            std::process::Command::new(&editor).arg(&path).status()
+            std::process::Command::new(program)
+                .args(&editor_args)
+                .arg(&path)
+                .status()
         });
 
         match outcome {
@@ -743,7 +770,7 @@ impl App {
             }
             _ => self.status = Some("$EDITOR did not save; kept your draft".into()),
         }
-        let _ = std::fs::remove_file(&path);
+        // `tmp` (NamedTempFile) is unlinked on drop.
     }
 
     fn reset_review(&mut self) {
@@ -809,7 +836,11 @@ impl App {
                     .ok()
                     .map(|d| state::storage_key(&d, &self.range.scope_id));
                 self.review = self.key.as_deref().map(state::load).unwrap_or_default();
-                self.status = Some(format!("Switched to {}", self.range.label));
+                self.status = Some(if self.files.is_empty() {
+                    format!("Switched to {} — no changes", self.range.label)
+                } else {
+                    format!("Switched to {}", self.range.label)
+                });
                 self.mode = Mode::Normal;
             }
             Err(e) => {

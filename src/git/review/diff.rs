@@ -80,7 +80,7 @@ impl ChangedFile {
     /// content is read from disk when the blob isn't in the object database).
     pub fn build(&self, to: Endpoint) -> Result<FileDiff, GitError> {
         let repo = get_repo()?;
-        let (old_bytes, new_bytes) = self.load_raw(&repo, to);
+        let (old_bytes, new_bytes) = self.load_raw(&repo, to)?;
 
         // Bail on oversized blobs before scanning/decoding them.
         if old_bytes.len() > MAX_BYTES || new_bytes.len() > MAX_BYTES {
@@ -109,26 +109,30 @@ impl ChangedFile {
     /// Load the raw old/new bytes for this file. New content comes from the
     /// object database for committed ranges, and from the working tree when the
     /// blob isn't yet hashed (worktree / untracked).
-    fn load_raw(&self, repo: &git2::Repository, to: Endpoint) -> (Vec<u8>, Vec<u8>) {
-        let old = blob_bytes(repo, self.old_id);
+    fn load_raw(
+        &self,
+        repo: &git2::Repository,
+        to: Endpoint,
+    ) -> Result<(Vec<u8>, Vec<u8>), GitError> {
+        let old = blob_bytes(repo, self.old_id)?;
         let new = match to {
-            Endpoint::Commit(_) => blob_bytes(repo, self.new_id),
+            Endpoint::Commit(_) => blob_bytes(repo, self.new_id)?,
             Endpoint::WorkingTree => {
                 if self.new_id.is_zero() {
-                    read_workdir(repo, &self.path)
+                    read_workdir(repo, &self.path)?
                 } else {
-                    blob_bytes(repo, self.new_id)
+                    blob_bytes(repo, self.new_id)?
                 }
             }
         };
-        (old, new)
+        Ok((old, new))
     }
 
     /// Old and new file contents as lossy UTF-8, for whole-file syntax
     /// highlighting (the highlighter indexes lines back into the diff's rows).
     pub fn load_contents(&self, to: Endpoint) -> Result<(String, String), GitError> {
         let repo = get_repo()?;
-        let (old, new) = self.load_raw(&repo, to);
+        let (old, new) = self.load_raw(&repo, to)?;
         Ok((
             String::from_utf8_lossy(&old).into_owned(),
             String::from_utf8_lossy(&new).into_owned(),
@@ -285,19 +289,24 @@ fn trim_line_endings(text: &mut String, emphasis: &mut Vec<(usize, usize)>) {
     }
 }
 
-fn blob_bytes(repo: &git2::Repository, oid: Oid) -> Vec<u8> {
+fn blob_bytes(repo: &git2::Repository, oid: Oid) -> Result<Vec<u8>, GitError> {
     if oid.is_zero() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    repo.find_blob(oid)
-        .map(|b| b.content().to_vec())
-        .unwrap_or_default()
+    // A non-zero oid that fails to load is a real error (corrupt/missing
+    // object); surface it instead of silently rendering an empty/wrong diff.
+    Ok(repo.find_blob(oid)?.content().to_vec())
 }
 
-fn read_workdir(repo: &git2::Repository, path: &str) -> Vec<u8> {
-    match repo.workdir() {
-        Some(root) => std::fs::read(root.join(path)).unwrap_or_default(),
-        None => Vec::new(),
+fn read_workdir(repo: &git2::Repository, path: &str) -> Result<Vec<u8>, GitError> {
+    let Some(root) = repo.workdir() else {
+        return Ok(Vec::new());
+    };
+    match std::fs::read(root.join(path)) {
+        Ok(bytes) => Ok(bytes),
+        // A missing working-tree file is an expected empty side (e.g. deleted).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(GitError::IoError(e)),
     }
 }
 

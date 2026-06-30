@@ -203,17 +203,36 @@ pub fn load(key: &str) -> ReviewState {
 
 /// Persist review state for `key` to the ephemeral temp location.
 pub fn save(key: &str, state: &ReviewState) -> std::io::Result<()> {
-    std::fs::create_dir_all(state_dir())?;
+    let dir = state_dir();
+    std::fs::create_dir_all(&dir)?;
+    // The review dir may sit in a shared /tmp; restrict it to the current user
+    // so other local users can't read review content.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+
     let persisted = Persisted {
         comments: state.comments.clone(),
         orphaned: state.orphaned.clone(),
     };
     let json = serde_json::to_string_pretty(&persisted)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    // Atomic write: a crash mid-write must not corrupt a resumable review.
+
     let path = state_path(key);
+    // Concurrency safety net: keep the prior on-disk state as a single-level
+    // .bak before overwriting, so a parallel review of the same scope can be
+    // recovered instead of silently clobbered. (Best-effort, not a merge.)
+    if let Ok(existing) = std::fs::read(&path)
+        && existing != json.as_bytes()
+    {
+        let _ = std::fs::write(path.with_extension("json.bak"), &existing);
+    }
+
+    // Atomic write: a crash mid-write must not corrupt a resumable review.
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
+    std::fs::write(&tmp, &json)?;
     std::fs::rename(&tmp, &path)
 }
 

@@ -22,6 +22,8 @@ toml = "0.9"
 # `inline` enables iter_inline_changes for word-level intra-line diffs; it only
 # pulls the already-default `text` feature, adding no transitive deps.
 similar = { version = "3.1", features = ["inline"] }
+# Exclusive, randomly-named temp file for the review comment $EDITOR pop-out.
+tempfile = "3"
 # default-features off + default-fancy => pure-Rust fancy-regex backend (no onig
 # C dependency), keeping `cargo install`/Homebrew builds toolchain-free.
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
