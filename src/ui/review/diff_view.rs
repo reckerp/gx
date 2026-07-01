@@ -19,6 +19,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use super::Appearance;
+use super::color::{self, ColorDepth};
 use super::highlight::{Highlighter, Segment};
 
 /// Colors for the diff view, chosen for the terminal's light or dark
@@ -38,10 +39,28 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn for_appearance(appearance: Appearance) -> Self {
-        match appearance {
+    pub fn for_appearance(appearance: Appearance, depth: ColorDepth) -> Self {
+        let base = match appearance {
             Appearance::Dark => Palette::dark(),
             Appearance::Light => Palette::light(),
+        };
+        base.adapted(depth)
+    }
+
+    /// Downsample every RGB field to the terminal's color depth so the diff
+    /// backgrounds survive on 256-color terminals (named colors pass through).
+    fn adapted(self, depth: ColorDepth) -> Self {
+        let a = |c: Color| color::adapt(c, depth);
+        Palette {
+            add_bg: a(self.add_bg),
+            add_emph_bg: a(self.add_emph_bg),
+            del_bg: a(self.del_bg),
+            del_emph_bg: a(self.del_emph_bg),
+            cursor_bg: a(self.cursor_bg),
+            select_bg: a(self.select_bg),
+            empty_bg: a(self.empty_bg),
+            gutter_fg: a(self.gutter_fg),
+            header_fg: a(self.header_fg),
         }
     }
 
@@ -308,6 +327,7 @@ pub fn render(
     h_scroll: usize,
     focused: bool,
     palette: Palette,
+    tab_width: usize,
 ) {
     let path_label = match &rf.diff.old_path {
         Some(old) => format!("{old} → {}", rf.diff.path),
@@ -354,6 +374,7 @@ pub fn render(
                         h_scroll,
                         focused && i == cursor,
                         palette,
+                        tab_width,
                     )
                 })
                 .collect()
@@ -371,6 +392,7 @@ pub fn render(
                         h_scroll,
                         focused && i == cursor,
                         palette,
+                        tab_width,
                     )
                 })
                 .collect()
@@ -415,6 +437,7 @@ fn side_line_to_line<'a>(
     h_scroll: usize,
     cursor: bool,
     pal: Palette,
+    tab_width: usize,
 ) -> Line<'a> {
     // First column is a 1-cell comment marker; the rest is the body.
     let body_width = width.saturating_sub(1);
@@ -439,6 +462,7 @@ fn side_line_to_line<'a>(
                 h_scroll,
                 cursor,
                 pal,
+                tab_width,
             ));
             spans.push(Span::styled(
                 " │ ",
@@ -453,6 +477,7 @@ fn side_line_to_line<'a>(
                 h_scroll,
                 cursor,
                 pal,
+                tab_width,
             ));
             Line::from(spans)
         }
@@ -469,6 +494,7 @@ fn uni_line_to_line<'a>(
     h_scroll: usize,
     cursor: bool,
     pal: Palette,
+    tab_width: usize,
 ) -> Line<'a> {
     let body_width = width.saturating_sub(1);
     match line {
@@ -506,6 +532,7 @@ fn uni_line_to_line<'a>(
                 h_scroll,
                 text_w,
                 pal,
+                tab_width,
             ));
             Line::from(spans)
         }
@@ -529,6 +556,7 @@ fn cell<'a>(
     h_scroll: usize,
     cursor: bool,
     pal: Palette,
+    tab_width: usize,
 ) -> Vec<Span<'a>> {
     let Some(row) = row else {
         // No line on this side: blank gutter + filler at the empty-side bg.
@@ -556,6 +584,7 @@ fn cell<'a>(
         h_scroll,
         text_w,
         pal,
+        tab_width,
     ));
     spans
 }
@@ -613,6 +642,12 @@ fn num_span<'a>(num: Option<usize>, gw: usize, bg: Color, pal: Palette) -> Span<
 /// Build the styled, horizontally-scrolled, width-padded text spans for a line,
 /// layering syntax color, diff background, and word-level emphasis. `text` is
 /// the raw line, used as a fallback when no syntax segments are available.
+///
+/// Tabs are expanded to `tab_width`-aligned spaces so indentation lines up — a
+/// raw `\t` in a ratatui span otherwise renders as a single cell and collapses
+/// indentation. Emphasis is keyed off the byte offset in `text`; the syntax
+/// segments concatenate to the same bytes, so tracking bytes as we walk either
+/// keeps both aligned.
 #[allow(clippy::too_many_arguments)]
 fn text_spans<'a>(
     text: &str,
@@ -623,21 +658,33 @@ fn text_spans<'a>(
     h_scroll: usize,
     width: usize,
     pal: Palette,
+    tab_width: usize,
 ) -> Vec<Span<'a>> {
     let base_bg = row_bg(kind, cursor, pal);
     let emph_bg = emph_bg(kind, cursor, pal);
+    let tab_width = tab_width.max(1);
 
-    // Expand to per-character (char, style), tracking byte offset for emphasis.
+    // Expand to per-cell (char, style), tracking byte offset for emphasis and
+    // visual column for tab stops.
     let mut chars: Vec<(char, Style)> = Vec::new();
     let mut byte = 0usize;
     let mut push_char = |ch: char, fg: Option<Color>| {
         let emphasized = in_ranges(byte, emphasis);
-        let mut style = Style::default().bg(if emphasized { emph_bg } else { base_bg });
+        let bg = if emphasized { emph_bg } else { base_bg };
+        byte += ch.len_utf8();
+        if ch == '\t' {
+            // Advance to the next tab stop, filling with the line's background.
+            let fill = tab_width - (chars.len() % tab_width);
+            for _ in 0..fill {
+                chars.push((' ', Style::default().bg(bg)));
+            }
+            return;
+        }
+        let mut style = Style::default().bg(bg);
         if let Some(c) = fg {
             style = style.fg(c);
         }
         chars.push((ch, style));
-        byte += ch.len_utf8();
     };
 
     if segments.is_empty() {
@@ -834,6 +881,66 @@ mod tests {
         assert!(!in_ranges(5, &ranges));
     }
 
+    /// Collect the rendered characters (spans flattened) for assertions.
+    fn rendered_text(spans: &[Span]) -> String {
+        spans.iter().flat_map(|s| s.content.chars()).collect()
+    }
+
+    #[test]
+    fn tab_expands_to_next_tab_stop() {
+        // A leading tab (width 4) becomes 4 spaces before the text.
+        let spans = text_spans(
+            "\tx",
+            &[],
+            &[],
+            RowKind::Context,
+            false,
+            0,
+            40,
+            Palette::dark(),
+            4,
+        );
+        let s = rendered_text(&spans);
+        assert!(s.starts_with("    x"), "tab should expand to 4 spaces, got {s:?}");
+    }
+
+    #[test]
+    fn tab_aligns_partial_column_to_stop() {
+        // "ab\tc" with width 4: after "ab" (col 2) a tab fills 2 cells to col 4.
+        let spans = text_spans(
+            "ab\tc",
+            &[],
+            &[],
+            RowKind::Context,
+            false,
+            0,
+            40,
+            Palette::dark(),
+            4,
+        );
+        let s = rendered_text(&spans);
+        assert!(s.starts_with("ab  c"), "expected alignment to next stop, got {s:?}");
+    }
+
+    #[test]
+    fn tab_expands_within_syntax_segments() {
+        // Segments (syntax path) carry the tab too; it must still expand.
+        let segs = vec![(Style::default().fg(Color::Rgb(1, 2, 3)), "\tlet".to_string())];
+        let spans = text_spans(
+            "\tlet",
+            &segs,
+            &[],
+            RowKind::Added,
+            false,
+            0,
+            40,
+            Palette::dark(),
+            2,
+        );
+        let s = rendered_text(&spans);
+        assert!(s.starts_with("  let"), "tab in segment should expand, got {s:?}");
+    }
+
     #[test]
     fn renders_unified_buffer_with_header_and_text() {
         use ratatui::Terminal;
@@ -862,6 +969,7 @@ mod tests {
                     0,
                     true,
                     Palette::dark(),
+                    4,
                 )
             })
             .unwrap();
@@ -900,6 +1008,7 @@ mod tests {
                     0,
                     true,
                     Palette::dark(),
+                    4,
                 )
             })
             .unwrap();

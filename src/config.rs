@@ -117,6 +117,19 @@ pub struct ReviewConfig {
     #[serde(default)]
     pub theme: String,
 
+    /// Color depth for the diff view: "auto" downsamples the theme's 24-bit
+    /// colors to the 256-color palette unless the terminal reliably supports
+    /// truecolor (many terminals and multiplexers silently drop 24-bit escapes,
+    /// which shows up as *no* syntax colors); "always" forces truecolor,
+    /// "never" forces 256-color.
+    #[serde(default = "default_truecolor")]
+    pub truecolor: String,
+
+    /// How many columns a tab expands to in the diff view. Tabs are rendered as
+    /// spaces so indentation lines up (a raw tab collapses to one cell).
+    #[serde(default = "default_tab_width")]
+    pub tab_width: u16,
+
     /// Minimum terminal width (columns) for side-by-side; below this the diff
     /// falls back to a unified single-column view.
     #[serde(default = "default_side_by_side_min_width")]
@@ -132,6 +145,14 @@ fn default_appearance() -> String {
     "auto".to_string()
 }
 
+fn default_truecolor() -> String {
+    "auto".to_string()
+}
+
+fn default_tab_width() -> u16 {
+    4
+}
+
 fn default_side_by_side_min_width() -> u16 {
     120
 }
@@ -145,6 +166,8 @@ impl Default for ReviewConfig {
         ReviewConfig {
             appearance: default_appearance(),
             theme: String::new(),
+            truecolor: default_truecolor(),
+            tab_width: default_tab_width(),
             side_by_side_min_width: default_side_by_side_min_width(),
             default_mode: default_review_mode(),
         }
@@ -310,6 +333,8 @@ mod tests {
         let review = ReviewConfig::default();
         assert_eq!(review.appearance, "auto");
         assert_eq!(review.theme, ""); // empty = auto-pick from appearance
+        assert_eq!(review.truecolor, "auto");
+        assert_eq!(review.tab_width, 4);
         assert_eq!(review.side_by_side_min_width, 120);
         assert_eq!(review.default_mode, "branch");
         assert_eq!(Config::default().review.appearance, "auto");

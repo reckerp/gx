@@ -3,16 +3,19 @@
 //! highlighting (U3/U4); the file-tree sidebar (U5) and persistence (U7) slot in
 //! as those units land.
 
+pub mod color;
 pub mod diff_view;
 pub mod file_tree;
 pub mod highlight;
 
+use crate::git::log::{self, LogEntry};
 use crate::git::review::blob;
 use crate::git::review::diff::{self, ChangedFile};
 use crate::git::review::range::{self, Endpoint, ReviewRange};
 use crate::git::review::state::{self, Comment, ReviewState, Side};
 use crate::ui::terminal::with_terminal;
 use crate::ui::{render_help_bar, status_char, status_color};
+use color::ColorDepth;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use diff_view::{RenderedFile, ViewMode};
 use file_tree::{FileTree, NodeKind};
@@ -24,6 +27,8 @@ use ratatui::widgets::*;
 use std::time::Duration;
 
 const SIDEBAR_WIDTH: u16 = 32;
+/// How many recent commits the commit picker lists.
+const COMMIT_PICKER_LIMIT: usize = 200;
 
 /// Resolved terminal appearance, driving the syntax theme and diff palette.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -52,6 +57,7 @@ enum Mode {
     CommentPopup,
     OrphanedList,
     RangeSwitch,
+    CommitPicker,
     Filter,
     Help,
 }
@@ -75,25 +81,39 @@ struct Popup {
 }
 
 /// Launch the review TUI for an already-resolved range and changed-file list.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     range: ReviewRange,
     files: Vec<ChangedFile>,
     theme: &str,
     min_width: u16,
     appearance: Appearance,
+    color_depth: ColorDepth,
+    tab_width: u16,
 ) -> Result<()> {
     // `with_terminal` enters the alternate screen / raw mode and restores it
     // (even on panic, via its guard) before returning; the inner Result carries
     // the loop's outcome plus an optional message to print after teardown.
-    let message =
-        with_terminal(|terminal| run_loop(terminal, range, files, theme, min_width, appearance))
-            .into_diagnostic()??;
+    let message = with_terminal(|terminal| {
+        run_loop(
+            terminal,
+            range,
+            files,
+            theme,
+            min_width,
+            appearance,
+            color_depth,
+            tab_width,
+        )
+    })
+    .into_diagnostic()??;
     if let Some(msg) = message {
         println!("{msg}");
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_loop(
     terminal: &mut crate::ui::Term,
     range: ReviewRange,
@@ -101,8 +121,10 @@ fn run_loop(
     theme: &str,
     min_width: u16,
     appearance: Appearance,
+    color_depth: ColorDepth,
+    tab_width: u16,
 ) -> Result<Option<String>> {
-    let mut app = App::new(range, files, theme, min_width, appearance);
+    let mut app = App::new(range, files, theme, min_width, appearance, color_depth, tab_width);
     let mut needs_redraw = true;
 
     loop {
@@ -161,6 +183,7 @@ struct App {
     h_scroll: usize,
     view_override: Option<ViewMode>,
     min_width: u16,
+    tab_width: u16,
     palette: diff_view::Palette,
     show_sidebar: bool,
     mode: Mode,
@@ -175,18 +198,26 @@ struct App {
     pending_bracket: Option<char>,
     last_diff_height: usize,
     last_view: ViewMode,
+    /// Commits offered by the commit picker (lazily loaded on first open).
+    commits: Vec<LogEntry>,
+    commit_cursor: usize,
+    /// A commit marked as one end of a range in the picker (press space).
+    commit_anchor: Option<usize>,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         range: ReviewRange,
         files: Vec<ChangedFile>,
         theme: &str,
         min_width: u16,
         appearance: Appearance,
+        color_depth: ColorDepth,
+        tab_width: u16,
     ) -> Self {
         let cache = (0..files.len()).map(|_| None).collect();
-        let palette = diff_view::Palette::for_appearance(appearance);
+        let palette = diff_view::Palette::for_appearance(appearance, color_depth);
         // Key persistence on the clone's shared git dir + the range scope, then
         // resume any saved review for this (clone, scope).
         let key = crate::git::worktree::common_git_dir()
@@ -200,7 +231,7 @@ impl App {
             files,
             selected: 0,
             cache,
-            highlighter: Highlighter::new(theme),
+            highlighter: Highlighter::new(theme, color_depth),
             review,
             tree,
             tree_cursor: 0,
@@ -210,6 +241,7 @@ impl App {
             h_scroll: 0,
             view_override: None,
             min_width,
+            tab_width,
             palette,
             show_sidebar: true,
             mode: Mode::Normal,
@@ -224,6 +256,9 @@ impl App {
             pending_bracket: None,
             last_diff_height: 1,
             last_view: ViewMode::SideBySide,
+            commits: Vec::new(),
+            commit_cursor: 0,
+            commit_anchor: None,
         }
     }
 
@@ -303,6 +338,10 @@ impl App {
             }
             Mode::RangeSwitch => {
                 self.handle_rangeswitch_key(key);
+                false
+            }
+            Mode::CommitPicker => {
+                self.handle_commitpicker_key(key);
                 false
             }
             Mode::Filter => {
@@ -801,7 +840,8 @@ impl App {
             }
             KeyCode::Char('b') => range::resolve_branch(None),
             KeyCode::Char('u') => range::resolve_uncommitted(),
-            KeyCode::Char('t') => range::resolve_branch(None).map(|mut r| {
+            // Accept both `w` (working tree) and the legacy `t`.
+            KeyCode::Char('w') | KeyCode::Char('t') => range::resolve_branch(None).map(|mut r| {
                 r.to = Endpoint::WorkingTree;
                 r.label = format!("{} +worktree", r.label);
                 // Distinct scope so the +worktree review doesn't share a
@@ -809,12 +849,109 @@ impl App {
                 r.scope_id = format!("{}+worktree", r.scope_id);
                 r
             }),
+            KeyCode::Char('c') => {
+                self.open_commit_picker();
+                return;
+            }
             _ => return,
         };
         match resolved {
             Ok(range) => self.switch_range(range),
             Err(e) => {
                 self.status = Some(format!("Range switch failed: {e}"));
+                self.mode = Mode::Normal;
+            }
+        }
+    }
+
+    /// Open the commit picker, loading recent commits on first use.
+    fn open_commit_picker(&mut self) {
+        if self.commits.is_empty() {
+            match log::get_log(COMMIT_PICKER_LIMIT) {
+                Ok(graph) => self.commits = graph.entries,
+                Err(e) => {
+                    self.status = Some(format!("Couldn't load commits: {e}"));
+                    self.mode = Mode::Normal;
+                    return;
+                }
+            }
+        }
+        if self.commits.is_empty() {
+            self.status = Some("No commits to pick from".into());
+            self.mode = Mode::Normal;
+            return;
+        }
+        self.commit_cursor = 0;
+        self.commit_anchor = None;
+        self.mode = Mode::CommitPicker;
+    }
+
+    fn handle_commitpicker_key(&mut self, key: event::KeyEvent) {
+        let len = self.commits.len();
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                self.mode = Mode::RangeSwitch;
+                self.commit_anchor = None;
+            }
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                if len > 0 {
+                    self.commit_cursor = (self.commit_cursor + 1).min(len - 1);
+                }
+            }
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                self.commit_cursor = self.commit_cursor.saturating_sub(1);
+            }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.commit_cursor = (self.commit_cursor + 10).min(len.saturating_sub(1));
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.commit_cursor = self.commit_cursor.saturating_sub(10);
+            }
+            (KeyCode::Char('g'), _) => self.commit_cursor = 0,
+            (KeyCode::Char('G'), _) => self.commit_cursor = len.saturating_sub(1),
+            // Space marks/unmarks a range endpoint.
+            (KeyCode::Char(' '), _) => {
+                self.commit_anchor = match self.commit_anchor {
+                    Some(a) if a == self.commit_cursor => None,
+                    _ => Some(self.commit_cursor),
+                };
+            }
+            (KeyCode::Enter, _) => self.confirm_commit_pick(),
+            _ => {}
+        }
+    }
+
+    /// Resolve the picker's selection into a range and switch to it. With no
+    /// anchor, review the single selected commit; with an anchor, review the
+    /// inclusive range between the two picked commits (older..newer).
+    fn confirm_commit_pick(&mut self) {
+        let Some(sel) = self.commits.get(self.commit_cursor) else {
+            return;
+        };
+        let resolved = match self.commit_anchor {
+            None => range::resolve_commit(&sel.oid.to_string()),
+            Some(anchor) => {
+                let Some(other) = self.commits.get(anchor) else {
+                    return;
+                };
+                // The log is newest-first, so the larger index is the older
+                // commit. Diff from just before the older commit to the newer.
+                let (older, newer) = if anchor >= self.commit_cursor {
+                    (other, sel)
+                } else {
+                    (sel, other)
+                };
+                // `older^..newer` includes the older commit itself in the diff.
+                // Short ids are git-unique and keep the header label readable.
+                let from = format!("{}^", older.short_id);
+                range::resolve_explicit_range(&from, &newer.short_id)
+            }
+        };
+        self.commit_anchor = None;
+        match resolved {
+            Ok(range) => self.switch_range(range),
+            Err(e) => {
+                self.status = Some(format!("Commit range failed: {e}"));
                 self.mode = Mode::Normal;
             }
         }
@@ -913,6 +1050,7 @@ impl App {
                 self.h_scroll,
                 self.focus == Focus::Diff,
                 self.palette,
+                self.tab_width as usize,
             );
         }
 
@@ -923,32 +1061,103 @@ impl App {
             Mode::CommentPopup => self.draw_popup(f, area),
             Mode::OrphanedList => self.draw_orphans(f, area),
             Mode::RangeSwitch => self.draw_rangeswitch(f, area),
+            Mode::CommitPicker => self.draw_commit_picker(f, area),
             _ => {}
         }
     }
 
     fn draw_rangeswitch(&self, f: &mut Frame, area: Rect) {
+        let key = |k: &str, desc: &str| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {k}  "),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(desc.to_string()),
+            ])
+        };
         let lines = vec![
             Line::from(Span::styled(
-                "Switch range",
+                "What do you want to review?",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )),
             Line::raw(""),
-            Line::raw("b   branch vs base (committed)"),
-            Line::raw("t   branch vs base + working tree"),
-            Line::raw("u   uncommitted (working tree vs HEAD)"),
+            key("u", "Uncommitted changes (working tree vs HEAD)"),
+            key("b", "All changes on this branch (base…HEAD)"),
+            key("w", "Branch changes + uncommitted working tree"),
+            key("c", "Pick a commit or commit range…"),
             Line::raw(""),
             Line::from(Span::styled(
                 "esc to cancel",
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        let popup = centered_rect(50, 45, area);
+        let popup = centered_rect(60, 50, area);
         f.render_widget(Clear, popup);
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Range — now: {} ", self.range.label));
+            .title(format!(" Review scope — now: {} ", self.range.label));
         f.render_widget(Paragraph::new(lines).block(block), popup);
+    }
+
+    fn draw_commit_picker(&self, f: &mut Frame, area: Rect) {
+        let popup = centered_rect(80, 80, area);
+        f.render_widget(Clear, popup);
+
+        let hint = match self.commit_anchor {
+            Some(_) => " Pick commit — ⏎ review range · space clear mark ",
+            None => " Pick commit — ⏎ review one · space mark range start ",
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(hint);
+        let inner = block.inner(popup);
+        f.render_widget(block, popup);
+
+        let h = inner.height as usize;
+        let start = if self.commit_cursor >= h {
+            self.commit_cursor - h + 1
+        } else {
+            0
+        };
+        // Width available for the summary after the fixed-width columns.
+        let sha_w = 8usize;
+        let time_w = 14usize;
+        let summary_w = (inner.width as usize).saturating_sub(sha_w + time_w + 4);
+
+        let lines: Vec<Line> = self
+            .commits
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(h)
+            .map(|(i, c)| {
+                let on_cursor = i == self.commit_cursor;
+                let is_anchor = self.commit_anchor == Some(i);
+                let mark = if is_anchor { "◆ " } else { "  " };
+                let mut summary = c.summary.clone();
+                if summary.chars().count() > summary_w {
+                    summary = summary.chars().take(summary_w.saturating_sub(1)).collect();
+                    summary.push('…');
+                }
+                let base = if on_cursor {
+                    Style::default().bg(self.palette.select_bg)
+                } else {
+                    Style::default()
+                };
+                Line::from(vec![
+                    Span::styled(mark, base.fg(Color::Magenta)),
+                    Span::styled(format!("{:sha_w$}", c.short_id), base.fg(Color::Yellow)),
+                    Span::styled(format!("{summary:summary_w$} "), base),
+                    Span::styled(
+                        format!("{:>time_w$}", c.time_relative),
+                        base.fg(Color::DarkGray),
+                    ),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
     }
 
     fn draw_orphans(&self, f: &mut Frame, area: Rect) {
@@ -990,7 +1199,10 @@ impl App {
             .title(format!(" Review — {} ", self.range.label));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let msg = format!("No changes in {}.\n\nPress q to quit.", self.range.label);
+        let msg = format!(
+            "No changes in {}.\n\nPress s to change scope (uncommitted · branch · pick a commit),\nor q to quit.",
+            self.range.label
+        );
         f.render_widget(
             Paragraph::new(msg)
                 .style(Style::default().fg(Color::DarkGray))
@@ -1103,7 +1315,7 @@ impl App {
                 ("D", "del"),
                 ("]c", "hunk"),
                 ("Tab", "file"),
-                ("s", "range"),
+                ("s", "scope"),
                 ("v", "view"),
                 ("F", "finish"),
                 ("X", "reset"),
@@ -1119,7 +1331,13 @@ impl App {
                 ("esc", "cancel"),
             ],
             Mode::OrphanedList => &[("esc", "close")],
-            Mode::RangeSwitch => &[("b/t/u", "pick"), ("esc", "cancel")],
+            Mode::RangeSwitch => &[("u/b/w/c", "pick scope"), ("esc", "cancel")],
+            Mode::CommitPicker => &[
+                ("j/k", "move"),
+                ("space", "mark range"),
+                ("⏎", "review"),
+                ("esc", "back"),
+            ],
             Mode::Filter => &[("type", "filter"), ("⏎", "apply"), ("esc", "clear")],
             Mode::Help => &[("esc", "close")],
         };
@@ -1178,7 +1396,7 @@ impl App {
             Line::raw("g / G          top / bottom"),
             Line::raw("]c / [c        next / prev hunk  (also } / {)"),
             Line::raw("Tab            focus the file sidebar (j/k move, ⏎ open, / filter)"),
-            Line::raw("s              switch range (branch / +worktree / uncommitted)"),
+            Line::raw("s              change scope: uncommitted / branch / +worktree / pick commit"),
             Line::raw("h / l  ← →     scroll horizontally"),
             Line::raw("c              comment on the current line"),
             Line::raw("V              start a multi-line selection, then c"),

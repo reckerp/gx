@@ -29,11 +29,18 @@ pub fn run(target: Option<String>, base: Option<String>) -> Result<()> {
         cfg.review.theme.clone()
     };
 
+    // Resolve the terminal color depth: themes are 24-bit RGB, but many
+    // terminals/multiplexers drop truecolor escapes (which reads as "no syntax
+    // highlighting"), so we downsample to 256-color unless truecolor is safe.
+    let color_depth = ui::review::color::detect(&cfg.review.truecolor);
+
     ui::review::run(
         range,
         files,
         &theme,
         cfg.review.side_by_side_min_width,
         appearance,
+        color_depth,
+        cfg.review.tab_width,
     )
 }

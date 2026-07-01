@@ -32,6 +32,22 @@ gx review A..B       # an explicit commit range
 The base defaults to `origin`'s default branch (falling back to `origin/main`
 then `origin/master`).
 
+### Switching scope inside the TUI
+
+You don't have to pick the range up front — press `s` while reviewing to change
+what you're looking at, without leaving the UI:
+
+- **Uncommitted changes** — the working tree vs `HEAD`.
+- **All changes on this branch** — `base…HEAD` (the default).
+- **Branch changes + working tree** — committed branch work plus anything not yet
+  committed.
+- **Pick a commit or range…** — opens a commit picker. `Enter` reviews the
+  highlighted commit on its own; press `space` to mark one end of a range, move
+  to the other commit, then `Enter` to review everything between them.
+
+Each scope keeps its own comments (they're keyed separately), so switching back
+and forth never mixes them up.
+
 ## Keys
 
 | Key | Action |
@@ -49,6 +65,7 @@ then `origin/master`).
 | `o` | list orphaned comments (see Persistence) |
 | `F` | **finish**: copy the review to the clipboard |
 | `X` (twice) | discard the saved review |
+| `s` | change scope: uncommitted · branch · +worktree · pick a commit/range |
 | `v` | toggle split / unified |
 | `b` | toggle the sidebar |
 | `?` | help overlay |
@@ -84,6 +101,8 @@ Under `[review]` in the gx config (`gx setup` shows the path):
 | --- | --- | --- |
 | `appearance` | `auto` | `auto` detects the terminal background (light/dark) and picks a matching theme + diff palette; `light` / `dark` force it |
 | `theme` | *(auto)* | syntect theme name; empty picks `InspiredGitHub` (light) or `base16-ocean.dark` (dark) from `appearance` |
+| `truecolor` | `auto` | `auto` uses 24-bit color only when the terminal reliably supports it, otherwise 256-color; `always` / `never` force it |
+| `tab_width` | `4` | columns a tab expands to in the diff |
 | `side_by_side_min_width` | `120` | below this terminal width, use the unified view |
 | `default_mode` | `branch` | default range mode |
 
@@ -91,3 +110,11 @@ The diff adapts to your terminal: on a light background it uses a light syntax
 theme with pale add/remove tints; on a dark background, a dark theme with the
 darker tints. If auto-detection guesses wrong (some terminals don't answer the
 query), set `appearance` explicitly.
+
+**No colors / plain text?** syntect themes are 24-bit RGB, but many terminals —
+Apple's Terminal.app, and tmux/screen unless configured for `RGB`/`Tc` — silently
+drop truecolor escapes, which shows up as a diff with no syntax highlighting and
+no add/remove backgrounds. `truecolor = "auto"` (the default) sidesteps this by
+downsampling to the widely-supported 256-color palette in those environments. If
+your terminal *does* handle truecolor through a multiplexer, set
+`truecolor = "always"` for full-fidelity colors.
