@@ -9,6 +9,7 @@
 //! A size guard keeps a large generated/vendored file (few changes, many lines)
 //! from stalling the UI: past the guard, lines are returned as plain text.
 
+use super::color::{self, ColorDepth};
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
@@ -39,12 +40,14 @@ pub type Segment = (Style, String);
 /// borrows the process-global theme set).
 pub struct Highlighter {
     theme: &'static Theme,
+    depth: ColorDepth,
 }
 
 impl Highlighter {
     /// Build a highlighter for `theme_name`, falling back to the default theme
-    /// and then to any available theme if the name is unknown.
-    pub fn new(theme_name: &str) -> Self {
+    /// and then to any available theme if the name is unknown. `depth` controls
+    /// whether the theme's 24-bit colors are downsampled to 256-color.
+    pub fn new(theme_name: &str, depth: ColorDepth) -> Self {
         let ts = theme_set();
         let theme = ts
             .themes
@@ -52,7 +55,7 @@ impl Highlighter {
             .or_else(|| ts.themes.get(DEFAULT_THEME))
             .or_else(|| ts.themes.values().next())
             .expect("syntect ships at least one default theme");
-        Highlighter { theme }
+        Highlighter { theme, depth }
     }
 
     /// Highlight a whole file into line-indexed styled segments; callers index
@@ -70,7 +73,7 @@ impl Highlighter {
         let mut out = Vec::new();
         for line in LinesWithEndings::from(content) {
             match highlighter.highlight_line(line, ps) {
-                Ok(ranges) => out.push(to_segments(ranges)),
+                Ok(ranges) => out.push(to_segments(ranges, self.depth)),
                 // Degrade a problem line to plain text rather than dropping it.
                 Err(_) => out.push(vec![(Style::default(), strip_eol(line))]),
             }
@@ -86,10 +89,10 @@ fn plain_lines(content: &str) -> Vec<Vec<Segment>> {
         .collect()
 }
 
-fn to_segments(ranges: Vec<(SynStyle, &str)>) -> Vec<Segment> {
+fn to_segments(ranges: Vec<(SynStyle, &str)>, depth: ColorDepth) -> Vec<Segment> {
     let mut segs: Vec<Segment> = ranges
         .into_iter()
-        .map(|(style, text)| (to_ratatui_style(style), text.to_string()))
+        .map(|(style, text)| (to_ratatui_style(style, depth), text.to_string()))
         .collect();
     // The last segment carries the line's trailing newline; drop it.
     if let Some(last) = segs.last_mut() {
@@ -107,12 +110,12 @@ fn strip_eol(line: &str) -> String {
     line.trim_end_matches(['\n', '\r']).to_string()
 }
 
-/// Convert a syntect style to a ratatui style: RGB foreground plus font
-/// modifiers. This is the bridge that lets us stay on ratatui 0.30 without the
-/// `syntect-tui` crate (which pins ratatui 0.29).
-pub fn to_ratatui_style(s: SynStyle) -> Style {
+/// Convert a syntect style to a ratatui style: foreground color (downsampled to
+/// `depth`) plus font modifiers. This is the bridge that lets us stay on ratatui
+/// 0.30 without the `syntect-tui` crate (which pins ratatui 0.29).
+pub fn to_ratatui_style(s: SynStyle, depth: ColorDepth) -> Style {
     let fg = s.foreground;
-    let mut style = Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b));
+    let mut style = Style::default().fg(color::adapt(Color::Rgb(fg.r, fg.g, fg.b), depth));
     if s.font_style.contains(FontStyle::BOLD) {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -163,7 +166,7 @@ mod tests {
             },
             font_style: FontStyle::BOLD | FontStyle::ITALIC,
         };
-        let style = to_ratatui_style(syn);
+        let style = to_ratatui_style(syn, ColorDepth::TrueColor);
         assert_eq!(style.fg, Some(Color::Rgb(10, 20, 30)));
         assert!(style.add_modifier.contains(Modifier::BOLD));
         assert!(style.add_modifier.contains(Modifier::ITALIC));
@@ -171,8 +174,19 @@ mod tests {
     }
 
     #[test]
+    fn bridge_downsamples_rgb_under_256() {
+        let syn = SynStyle {
+            foreground: SynColor { r: 255, g: 0, b: 0, a: 255 },
+            background: SynColor { r: 0, g: 0, b: 0, a: 255 },
+            font_style: FontStyle::empty(),
+        };
+        let style = to_ratatui_style(syn, ColorDepth::Ansi256);
+        assert_eq!(style.fg, Some(Color::Indexed(196)));
+    }
+
+    #[test]
     fn highlights_rust_into_multiple_colors_and_keeps_line_count() {
-        let h = Highlighter::new("base16-ocean.dark");
+        let h = Highlighter::new("base16-ocean.dark", ColorDepth::TrueColor);
         let content = "fn main() {\n    let x = 1;\n}\n";
         let lines = h.highlight_file("main.rs", content);
 
@@ -183,7 +197,7 @@ mod tests {
 
     #[test]
     fn unknown_extension_does_not_panic() {
-        let h = Highlighter::new("base16-ocean.dark");
+        let h = Highlighter::new("base16-ocean.dark", ColorDepth::TrueColor);
         let lines = h.highlight_file("notes.unknownext", "hello world\n");
         assert_eq!(lines.len(), 1);
     }
@@ -191,13 +205,13 @@ mod tests {
     #[test]
     fn unknown_theme_falls_back() {
         // Must not panic on a bogus theme name.
-        let h = Highlighter::new("no-such-theme");
+        let h = Highlighter::new("no-such-theme", ColorDepth::TrueColor);
         assert_eq!(h.highlight_file("a.rs", "fn a(){}\n").len(), 1);
     }
 
     #[test]
     fn oversized_file_returns_plain_segments() {
-        let h = Highlighter::new("base16-ocean.dark");
+        let h = Highlighter::new("base16-ocean.dark", ColorDepth::TrueColor);
         let big = "x\n".repeat(MAX_HIGHLIGHT_LINES + 1);
         let lines = h.highlight_file("big.rs", &big);
         assert_eq!(lines.len(), MAX_HIGHLIGHT_LINES + 1);
